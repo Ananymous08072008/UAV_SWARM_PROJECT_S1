@@ -1,0 +1,49 @@
+# Scenario A - network degradation
+# The busiest relay's radio degrades; the swarm must detect it and hand the role over.
+scenario:
+  name: network_degradation
+  description: >
+    The radio of the relay carrying the most traffic drops to 15 % quality at t = 90 s and
+    recovers at t = 220 s. Measures detection time, relay re-selection and recovery time.
+  duration_s: 600.0
+  seed: 42
+
+area:
+  x_min_m: -200.0
+  x_max_m: 900.0
+  y_min_m: -200.0
+  y_max_m: 700.0
+
+gcs:
+  position_m: [0.0, 0.0, 0.0]
+
+disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
+
+uavs:
+  count: 6
+  formation: grid
+  per_row: 3
+  spacing_m: 15.0
+  start_m: [-20.0, -40.0]
+  initial_battery_pct: 100.0
+
+pois:
+  - id: POI-A
+    position_m: [420.0, 120.0]
+    priority: 3
+    survey_time_s: 90.0
+  - id: POI-B
+    position_m: [640.0, 380.0]
+    priority: 4
+    survey_time_s: 120.0
+
+obstacles: []
+
+timeline:
+  - at_s: 90.0
+    action: degrade_link
+    params: {uav_id: critical_relay, quality: 0.15}
+
+  - at_s: 220.0
+    action: restore_link
+    params: {uav_id: degraded_radio}

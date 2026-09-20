@@ -1,0 +1,17 @@
+# Core simulation (core/, simulation/, swarm/, swarm_logging/)
+numpy>=1.24
+PyYAML>=6.0
+
+# MAVLink telemetry to Mission Planner (telemetry/)
+pymavlink>=2.4.41
+
+# Live dashboard (dashboard/)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# Experiments and figures (experiments/)
+matplotlib>=3.7
+
+# Tests
+pytest>=7.0
+httpx>=0.27            # required by fastapi.testclient

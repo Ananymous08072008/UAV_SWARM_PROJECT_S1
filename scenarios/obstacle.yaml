@@ -1,0 +1,45 @@
+# Scenario B - obstacle across the relay backbone
+# Debris blocks the longest hop; the relay chain has to route around it.
+scenario:
+  name: obstacle
+  description: >
+    At t = 120 s a 70 m tall obstacle with 40 dB attenuation appears on the longest hop of
+    the backbone. The relay planner must find a detour and reconnect the survey UAVs.
+  duration_s: 600.0
+  seed: 42
+
+area:
+  x_min_m: -200.0
+  x_max_m: 900.0
+  y_min_m: -200.0
+  y_max_m: 700.0
+
+gcs:
+  position_m: [0.0, 0.0, 0.0]
+
+disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
+
+uavs:
+  count: 6
+  formation: grid
+  per_row: 3
+  spacing_m: 15.0
+  start_m: [-20.0, -40.0]
+  initial_battery_pct: 100.0
+
+pois:
+  - id: POI-A
+    position_m: [420.0, 120.0]
+    priority: 3
+    survey_time_s: 90.0
+  - id: POI-B
+    position_m: [640.0, 380.0]
+    priority: 4
+    survey_time_s: 120.0
+
+obstacles: []
+
+timeline:
+  - at_s: 120.0
+    action: add_obstacle
+    params: {id: DEBRIS-1, center_m: backbone_midpoint, size_m: 150.0, height_m: 70.0, attenuation_db: 40.0}

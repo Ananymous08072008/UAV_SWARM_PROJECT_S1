@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UAV Swarm - Mission Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>UAV Swarm <span class="sub">resilient disaster-response mission</span></h1>
+  <div class="head-stats">
+    <div><span class="label">scenario</span><span id="h-scenario">-</span></div>
+    <div><span class="label">mode</span><span id="h-mode">-</span></div>
+    <div><span class="label">time</span><span id="h-time">0 s</span></div>
+    <div><span class="label">PoIs</span><span id="h-pois">0/0</span></div>
+    <div><span class="label">link</span><span id="h-conn" class="pill down">offline</span></div>
+  </div>
+</header>
+
+<main>
+  <section class="panel map-panel">
+    <h2>Live map <span class="hint">UAVs, PoIs, relay links, obstacles - zoom with +/-</span></h2>
+    <div id="map"></div>
+    <div class="legend">
+      <span><i class="dot role-SURVEY"></i>survey</span>
+      <span><i class="dot role-RELAY"></i>relay</span>
+      <span><i class="dot role-IDLE"></i>idle</span>
+      <span><i class="dot role-BACKUP"></i>backup</span>
+      <span><i class="dot role-RETURNING"></i>returning</span>
+      <span><i class="dot role-CHARGING"></i>charging</span>
+      <span><i class="dot failed"></i>lost</span>
+    </div>
+  </section>
+
+  <section class="panel metrics-panel">
+    <h2>Mission metrics</h2>
+    <div id="metrics" class="metrics"></div>
+  </section>
+
+  <section class="panel table-panel">
+    <h2>UAVs <span class="hint">click a row to select</span></h2>
+    <div class="table-wrap">
+      <table id="uav-table">
+        <thead><tr>
+          <th>UAV</th><th>role</th><th>mode</th><th>task</th><th>bat %</th>
+          <th>route</th><th>PDR</th><th>lat ms</th><th>alt</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel network-panel">
+    <h2>Communication network <span class="hint">GCS = node 0, thickness = link quality</span></h2>
+    <div id="network"></div>
+  </section>
+
+  <section class="panel control-panel">
+    <h2>Operator controls <span class="hint">inject events live</span></h2>
+    <div class="controls">
+      <button data-action="degrade">Degrade critical relay</button>
+      <button data-action="restore">Restore radios</button>
+      <button data-action="fail">Fail critical relay</button>
+      <button data-action="obstacle">Debris on backbone</button>
+      <button data-action="clear-obstacles">Clear obstacles</button>
+      <button data-action="urgent-poi">New urgent PoI</button>
+      <button data-action="drain">Drain selected UAV</button>
+    </div>
+    <div id="selected-uav" class="selected">no UAV selected</div>
+    <div id="incidents" class="incidents"></div>
+  </section>
+
+  <section class="panel log-panel">
+    <h2>Event log
+      <span class="hint">
+        <label><input type="checkbox" id="filter-important" checked> important only</label>
+      </span>
+    </h2>
+    <div id="log" class="log"></div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="/static/map.js"></script>
+<script src="/static/network.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

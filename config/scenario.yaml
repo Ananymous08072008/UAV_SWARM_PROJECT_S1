@@ -1,0 +1,101 @@
+# =====================================================================
+# Full demonstration scenario - earthquake / landslide response
+# ---------------------------------------------------------------------
+# The GCS sits outside the disaster area. Ten UAVs survey PoIs deep
+# inside it, so survey UAVs can only reach the GCS through relay chains.
+# The timeline injects all five demonstration events in one run.
+# Focused single-event scenarios live in scenarios/.
+# =====================================================================
+
+scenario:
+  name: full_demo
+  description: >
+    Twelve UAVs survey six PoIs in a disaster area 0.4-1.2 km from the GCS.
+    The run contains radio degradation, an obstacle across the relay
+    backbone, an early PoI completion, a new high-priority region, a UAV
+    loss and a battery-driven relay handover.
+  duration_s: 1200.0
+  seed: 42
+
+area:
+  x_min_m: -200.0
+  x_max_m: 1300.0
+  y_min_m: -300.0
+  y_max_m: 1100.0
+
+gcs:
+  position_m: [0.0, 0.0, 0.0]
+
+# Rough outline of the disaster area (drawn on the dashboard map).
+disaster_zone: [[300, -50], [1200, -50], [1200, 1000], [250, 1000]]
+
+uavs:
+  count: 12
+  formation: grid
+  per_row: 6
+  spacing_m: 15.0
+  start_m: [-30.0, -50.0]
+  initial_battery_pct: 100.0
+  battery_overrides: {}
+
+pois:
+  - id: POI-1
+    position_m: [400.0, 150.0]
+    priority: 3
+    survey_time_s: 60.0
+  - id: POI-2
+    position_m: [620.0, 480.0]
+    priority: 4
+    survey_time_s: 80.0
+  - id: POI-3
+    position_m: [880.0, 200.0]
+    priority: 2
+    survey_time_s: 60.0
+  - id: POI-4
+    position_m: [300.0, 700.0]
+    priority: 3
+    survey_time_s: 70.0
+  - id: POI-5
+    position_m: [900.0, 700.0]
+    priority: 5
+    survey_time_s: 90.0
+  - id: POI-6
+    position_m: [1100.0, 450.0]
+    priority: 2
+    survey_time_s: 50.0
+
+random_pois:
+  count: 0
+
+obstacles: []
+
+timeline:
+  # Scenario A - the busiest relay's radio degrades
+  - at_s: 80.0
+    action: degrade_link
+    params: {uav_id: critical_relay, quality: 0.15}
+
+  # Scenario C - a PoI is finished early (enough imagery already collected)
+  - at_s: 150.0
+    action: complete_poi
+    params: {poi_id: POI-5}
+
+  # Scenario B - debris blocks the longest hop of the relay backbone
+  - at_s: 200.0
+    action: add_obstacle
+    params: {id: DEBRIS-1, center_m: backbone_midpoint, size_m: 140.0, height_m: 70.0, attenuation_db: 40.0}
+
+  # A new high-priority region emerges (survivors reported) - the swarm launches again
+  - at_s: 260.0
+    action: add_poi
+    params: {id: POI-URGENT, position_m: [250.0, 900.0], priority: 5, survey_time_s: 60.0}
+
+  # A UAV is lost while the new region is being served
+  - at_s: 330.0
+    action: fail_uav
+    params: {uav_id: critical_relay, reason: "motor failure"}
+
+  # A relay runs low on battery -> handover before it returns home
+  - at_s: 380.0
+    action: set_battery
+    params: {uav_id: "role:RELAY", battery_pct: 19.0}

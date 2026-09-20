@@ -1,0 +1,42 @@
+# Runs the test suite automatically on GitHub's servers for every push and
+# pull request, so nobody can merge a change that breaks main.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run the test suite
+        env:
+          MPLBACKEND: Agg      # matplotlib has no display on a CI runner
+        run: python -m pytest -q
+
+      - name: Smoke-test a headless simulation run
+        env:
+          MPLBACKEND: Agg
+        run: python main.py --duration 300 --quiet --no-results

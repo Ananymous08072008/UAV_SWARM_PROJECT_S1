@@ -1,0 +1,18 @@
+# Normalise line endings so Windows, Linux and macOS teammates never see a
+# whole file as "changed" just because of CRLF vs LF.
+* text=auto
+
+# Files that must stay LF even on Windows (they run on Linux CI / shells).
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# Binary files git must never try to convert or diff as text.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.pdf       binary
+*.zip       binary
+*.sqlite    binary
+*.db        binary

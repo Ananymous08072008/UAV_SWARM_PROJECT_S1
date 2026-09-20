@@ -1,0 +1,43 @@
+# Scenario 0 - normal operation (reference run)
+# No faults: the swarm surveys both PoIs while keeping a relay chain to the GCS.
+scenario:
+  name: normal
+  description: >
+    Six UAVs, two PoIs behind the radio horizon. Nothing is injected, so this run is the
+    reference for connectivity, imagery delay and energy use.
+  duration_s: 540.0
+  seed: 42
+
+area:
+  x_min_m: -200.0
+  x_max_m: 900.0
+  y_min_m: -200.0
+  y_max_m: 700.0
+
+gcs:
+  position_m: [0.0, 0.0, 0.0]
+
+disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
+
+uavs:
+  count: 6
+  formation: grid
+  per_row: 3
+  spacing_m: 15.0
+  start_m: [-20.0, -40.0]
+  initial_battery_pct: 100.0
+
+pois:
+  - id: POI-A
+    position_m: [420.0, 120.0]
+    priority: 3
+    survey_time_s: 90.0
+  - id: POI-B
+    position_m: [640.0, 380.0]
+    priority: 4
+    survey_time_s: 120.0
+
+obstacles: []
+
+timeline:
+  []  # nothing injected

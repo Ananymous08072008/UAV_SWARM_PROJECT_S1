@@ -1,0 +1,153 @@
+# =====================================================================
+# UAV SWARM PROJECT - physical and algorithm parameters
+# ---------------------------------------------------------------------
+# These values describe HOW the system behaves (vehicle limits, radio,
+# algorithms). WHAT happens in a run (UAVs, PoIs, timeline) is in the
+# scenario files.
+#
+# Units: metres, seconds, degrees, percent, dB, Mbit/s.
+# Local frame is ENU: x = East, y = North, z = Up, origin = GCS.
+# Unknown keys inside a section raise an error (typo protection).
+# =====================================================================
+
+simulation:
+  dt_s: 0.1                 # physics step
+  seed: 42                  # master RNG seed -> reproducible experiments
+  status_interval_s: 30.0   # console status table period (main.py)
+  event_history: 5000       # events kept in memory for the dashboard
+
+# Geographic anchor for Mission Planner. Default = ArduPilot SITL home (CMAC).
+geo_origin:
+  lat_deg: -35.363261
+  lon_deg: 149.165230
+  alt_msl_m: 584.0
+
+uav:
+  cruise_speed_mps: 10.0
+  max_accel_mps2: 3.0
+  climb_rate_mps: 3.0
+  arrival_radius_m: 2.0
+  default_altitude_m: 35.0   # survey altitude if a PoI does not specify one
+  rth_altitude_m: 45.0       # return-to-home transit altitude
+  max_altitude_m: 120.0      # regulatory ceiling
+  heading_min_speed_mps: 0.5
+
+battery:
+  hover_drain_pct_per_min: 4.0    # ~18 min endurance hovering
+  cruise_drain_pct_per_min: 1.5   # EXTRA drain at cruise speed
+  low_pct: 30.0
+  critical_pct: 15.0
+  charge_rate_pct_per_min: 25.0   # battery swap / fast charge on the home pad
+  resume_pct: 95.0
+
+# --- swarm research network (simulation/communication.py) -------------
+# Log-distance path loss + logistic PDR curve. With these values a healthy
+# UAV-UAV link reaches ~193 m at 85 % PDR (~240 m at 50 %), and a UAV-GCS
+# link ~328 m at 85 % thanks to the bigger ground antenna.
+communication:
+  tx_power_dbm: 20.0
+  uav_antenna_gain_dbi: 0.0
+  gcs_antenna_gain_dbi: 6.0
+  gcs_antenna_height_m: 10.0
+  path_loss_ref_db: 40.0
+  path_loss_exponent: 2.6
+  noise_floor_dbm: -90.0
+  snr_mid_db: 8.0           # SNR giving 50 % PDR
+  snr_slope_db: 1.5
+  fading_sigma_db: 1.0      # shadow fading per measurement
+  pdr_smoothing: 0.4        # EWMA weight of the newest measurement
+  link_up_pdr: 0.55         # hysteresis: a link comes up here ...
+  link_down_pdr: 0.45       # ... and drops out here
+  hop_latency_ms: 5.0
+  retx_latency_ms: 8.0
+  update_interval_s: 0.5
+
+# --- imagery / situational data (simulation/data_model.py) ------------
+data:
+  imagery_rate_mbps: 3.0
+  link_capacity_mbps: 40.0
+  buffer_capacity_mb: 4000.0
+  pad_download_mbps: 100.0
+  live_delay_s: 10.0          # imagery delivered within 10 s counts as live
+
+# --- swarm intelligence (swarm/*) -------------------------------------
+swarm:
+  decision_interval_s: 1.0
+  backup_enabled: true
+  backup_min_battery_pct: 60.0
+  data_ferry: true            # disconnected UAVs carry data back themselves
+
+  routing:
+    hysteresis: 0.15          # keep the current next hop while within 15 % of the best
+    min_link_pdr: 0.7         # weaker links are used only when nothing else reaches the GCS
+    weak_link_penalty: 10.0   # extra cost (transmissions) of a weak link
+
+  allocation:
+    reserve_pct: 10.0         # battery kept for the trip home
+    battery_weight_s: 2.0     # seconds of travel that 1 % of battery is worth
+    ferry_wait_s: 240.0       # after this wait, survey even without a relay chain (store-and-forward)
+
+  relay:
+    relay_altitude_m: 55.0
+    min_planned_pdr: 0.85     # planned quality of every hop
+    spacing_safety: 0.9
+    reposition_threshold_m: 25.0
+    min_battery_pct: 35.0
+    replan_interval_s: 10.0
+    stickiness_s: 30.0        # bonus for keeping the relay that is already there
+
+  energy:
+    reserve_pct: 8.0
+    handover: true
+    handover_margin_pct: 6.0
+    max_handover_wait_s: 60.0
+    idle_recharge_below_pct: 60.0
+    idle_recharge_after_s: 20.0
+
+  priority:
+    ageing_per_min: 0.25      # waiting PoIs slowly gain priority (no starvation)
+    max_ageing_bonus: 1.5
+    preempt: true
+    preempt_min_priority: 4
+    preempt_priority_gap: 2
+
+  safety:
+    min_separation_m: 5.0
+    altitude_floor_m: 40.0    # every UAV owns a flight level: 40 m + (id - 1) * 6 m
+    altitude_layers: 12       # >= fleet size, so no two UAVs share a level
+    layer_spacing_m: 6.0
+    obstacle_clearance_m: 10.0
+    recall_at_deadline: true
+    recall_margin_s: 30.0
+
+  reconfiguration:
+    enabled: true
+    anomaly_ratio: 0.6        # measured/predicted PDR below this = anomalous link
+    min_predicted_pdr: 0.5
+    detection_window_s: 2.0
+    failure_timeout_s: 2.0    # heartbeat loss before a UAV is declared lost
+    recovery_pdr: 0.7
+    incident_timeout_s: 300.0
+    disconnect_backoff_s: 15.0  # re-plan a cut-off surveyor at most this often
+
+# --- MAVLink telemetry to Mission Planner (telemetry/*) ---------------
+telemetry:
+  target_host: 127.0.0.1
+  target_port: 14550
+  bind_port: 0                # 0 = any free local port
+  statustext_events: true     # show swarm decisions in the Mission Planner message pane
+  rates_hz:
+    HEARTBEAT: 1.0
+    GLOBAL_POSITION_INT: 5.0
+    ATTITUDE: 5.0
+    VFR_HUD: 2.0
+    SYS_STATUS: 1.0
+    GPS_RAW_INT: 1.0
+    SWARM_STATUS: 1.0         # NAMED_VALUE_FLOAT: role, link quality, hop count
+    HOME_POSITION: 0.2        # each vehicle's home pad
+
+# --- dashboard (dashboard/*) ------------------------------------------
+dashboard:
+  host: 127.0.0.1
+  port: 8000
+  push_interval_s: 0.2

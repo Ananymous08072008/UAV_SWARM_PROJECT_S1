@@ -1,0 +1,45 @@
+# Scenario E - newly emerging high-priority region
+# A priority-5 region appears with no spare UAV: a low-priority survey is pre-empted.
+scenario:
+  name: new_priority_poi
+  description: >
+    Five UAVs are fully committed (two surveys plus the relays that keep them connected)
+    when a priority-5 region appears at t = 120 s. Measures the response time to it.
+  duration_s: 600.0
+  seed: 42
+
+area:
+  x_min_m: -200.0
+  x_max_m: 900.0
+  y_min_m: -200.0
+  y_max_m: 700.0
+
+gcs:
+  position_m: [0.0, 0.0, 0.0]
+
+disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
+
+uavs:
+  count: 5
+  formation: grid
+  per_row: 3
+  spacing_m: 15.0
+  start_m: [-20.0, -40.0]
+  initial_battery_pct: 100.0
+
+pois:
+  - id: POI-A
+    position_m: [420.0, 120.0]
+    priority: 3
+    survey_time_s: 90.0
+  - id: POI-B
+    position_m: [640.0, 380.0]
+    priority: 4
+    survey_time_s: 120.0
+
+obstacles: []
+
+timeline:
+  - at_s: 120.0
+    action: add_poi
+    params: {id: POI-URGENT, position_m: [300.0, 520.0], priority: 5, survey_time_s: 50.0}

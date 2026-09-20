@@ -1,0 +1,49 @@
+# Scenario D - UAV loss and battery-driven return to home
+# One UAV is lost outright; another is drained so it must hand over its relay role.
+scenario:
+  name: uav_failure_rth
+  description: >
+    At t = 140 s the busiest relay fails without warning. At t = 200 s a relay is drained to
+    18 %, so it requests a replacement, hands over and returns home to recharge.
+  duration_s: 600.0
+  seed: 42
+
+area:
+  x_min_m: -200.0
+  x_max_m: 900.0
+  y_min_m: -200.0
+  y_max_m: 700.0
+
+gcs:
+  position_m: [0.0, 0.0, 0.0]
+
+disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
+
+uavs:
+  count: 6
+  formation: grid
+  per_row: 3
+  spacing_m: 15.0
+  start_m: [-20.0, -40.0]
+  initial_battery_pct: 100.0
+
+pois:
+  - id: POI-A
+    position_m: [420.0, 120.0]
+    priority: 3
+    survey_time_s: 90.0
+  - id: POI-B
+    position_m: [640.0, 380.0]
+    priority: 4
+    survey_time_s: 120.0
+
+obstacles: []
+
+timeline:
+  - at_s: 140.0
+    action: fail_uav
+    params: {uav_id: critical_relay, reason: "motor failure"}
+
+  - at_s: 200.0
+    action: set_battery
+    params: {uav_id: "role:RELAY", battery_pct: 19.0}
