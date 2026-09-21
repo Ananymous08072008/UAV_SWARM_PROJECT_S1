@@ -27,22 +27,39 @@ Python 3.10 or newer. Everything else (pymavlink, FastAPI, numpy) comes from `re
 ## Run
 
 ```bash
+python -m dashboard.server         # mission studio: build and run missions in the browser
 python main.py                     # headless full-demo scenario, prints events + summary
 python main.py --demo              # dashboard + MAVLink + real time (what to record for the video)
 python main.py --dashboard --realtime --speed 4
 python main.py --scenario scenarios/network_degradation.yaml --mode baseline
-python -m pytest -q                # 99 tests
+python -m pytest -q                # 137 tests
 ```
 
 Useful flags: `--mode adaptive|baseline`, `--duration`, `--seed`, `--quiet`, `--all-events`,
 `--no-results`, `--keep-running`, `--port`, `--mavlink-target host:port`.
+
+Both servers listen on `127.0.0.1` by default, which accepts connections from this machine only.
+To let other computers on your network open the dashboard, add `--host 0.0.0.0` and allow the port
+through the firewall once — the server then prints the LAN link to share:
+[docs/running.md](docs/running.md#letting-other-machines-reach-your-dashboard-lan).
+
+### Mission studio (multi-user web app)
+
+`python -m dashboard.server` serves <http://127.0.0.1:8000> and starts no simulation of its own -
+every visitor builds and runs their own. Choose the UAV count, click the map to place Points of
+Interest and set their priorities, pick adaptive or baseline, then launch. Pause, resume, restart
+and change speed while it runs; live charts plot connectivity, route PDR, latency and imagery
+delivery over time, so a relay failure and the recovery are visible as they happen. Sessions are
+independent worlds in their own threads, and the URL (`/?session=<id>`) can be shared so several
+people watch or drive the same mission. Full guide: [docs/running.md](docs/running.md).
 
 ### Dashboard
 
 `--dashboard` serves <http://127.0.0.1:8000>: live map (UAVs, PoIs, relay links, obstacles),
 UAV table, communication graph, event log, metrics, and operator buttons that inject faults into
 the running simulation (degrade a relay's radio, drop debris on the backbone, add an urgent PoI,
-drain a battery, fail a UAV).
+drain a battery, fail a UAV). One shared simulation, driven from the command line - use the
+mission studio when people need their own.
 
 ### Mission Planner
 
@@ -84,11 +101,11 @@ simulation/             physics: radio channel, obstacles, battery estimates, im
 swarm/                  decisions: allocation, relays, routing, roles, energy, priority, safety,
                         reconfiguration, mission_manager
 telemetry/              MAVLink gateway, message builders, coordinate conversion, rate scheduler
-dashboard/              FastAPI + WebSocket server, map / network / log / control front end
+dashboard/              mission studio (sessions, mission builder, charts) + FastAPI/WebSocket server
 swarm_logging/          event log files, metrics, SQLite database
 scenarios/              one file per demonstration scenario
 experiments/            batch runs and figures
-tests/                  99 tests across all layers
+tests/                  137 tests across all layers
 docs/                   architecture, Mission Planner guide, proposal outline, demo script
 ```
 

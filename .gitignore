@@ -17,6 +17,7 @@ env/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+pytest_output.txt
 
 # ---- Editor / IDE ----
 .idea/

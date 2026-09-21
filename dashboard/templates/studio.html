@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UAV Swarm - Mission Studio</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/studio.css">
+</head>
+<body>
+
+<header>
+  <h1>UAV Swarm <span class="sub">mission studio</span></h1>
+  <div class="head-stats">
+    <div><span class="label">mission</span><span id="h-scenario">-</span></div>
+    <div><span class="label">mode</span><span id="h-mode">-</span></div>
+    <div><span class="label">time</span><span id="h-time">-</span></div>
+    <div><span class="label">PoIs</span><span id="h-pois">-</span></div>
+    <div><span class="label">state</span><span id="h-state" class="pill">idle</span></div>
+  </div>
+</header>
+
+<!-- ============================ MISSION BUILDER ============================ -->
+<main id="builder-view">
+  <section class="panel builder-map-panel">
+    <h2>Plan the mission <span class="hint">click the map to place a PoI, click a PoI to remove it</span></h2>
+    <div id="builder-map"></div>
+    <p id="builder-note" class="note"></p>
+  </section>
+
+  <section class="panel builder-form-panel">
+    <h2>Mission setup</h2>
+
+    <label class="field">
+      <span>UAVs <b id="uav-count-value">12</b></span>
+      <input type="range" id="uav-count" min="1" max="40" value="12">
+    </label>
+
+    <label class="field">
+      <span>Duration <b id="duration-value">600 s</b></span>
+      <input type="range" id="duration" min="60" max="3600" step="30" value="600">
+    </label>
+
+    <label class="field">
+      <span>Speed <b id="speed-value">4x</b></span>
+      <input type="range" id="speed" min="1" max="20" step="1" value="4">
+    </label>
+
+    <label class="field">
+      <span>Seed</span>
+      <input type="number" id="seed" value="42" min="0" max="999999">
+    </label>
+
+    <label class="field">
+      <span>Mode</span>
+      <select id="mode">
+        <option value="adaptive">adaptive (proposed system)</option>
+        <option value="baseline">baseline (static comparison)</option>
+      </select>
+    </label>
+
+    <label class="check">
+      <input type="checkbox" id="faults" checked>
+      <span>Inject the demonstration faults</span>
+    </label>
+
+    <h3>Points of Interest <span id="poi-count" class="hint">0 placed</span></h3>
+    <div id="poi-list" class="poi-list">
+      <p class="note">No PoIs yet. Click the map to place one, or launch with the
+         standard six.</p>
+    </div>
+    <button id="clear-pois" class="ghost">Clear PoIs</button>
+
+    <button id="launch" class="primary">Launch mission</button>
+    <p id="launch-error" class="error"></p>
+
+    <h3>Running on this server <span id="capacity" class="hint"></span></h3>
+    <div id="session-list" class="session-list"></div>
+  </section>
+</main>
+
+<!-- ============================== LIVE VIEW =============================== -->
+<main id="live-view" hidden>
+  <section class="panel control-bar">
+    <button id="btn-pause">Pause</button>
+    <button id="btn-restart">Restart</button>
+    <button id="btn-stop">Stop</button>
+    <label class="inline-speed">
+      speed <b id="live-speed-value">4x</b>
+      <input type="range" id="live-speed" min="1" max="20" step="1" value="4">
+    </label>
+    <span class="spacer"></span>
+    <span id="live-session" class="hint"></span>
+    <button id="btn-new" class="ghost">New mission</button>
+  </section>
+
+  <section class="panel map-panel">
+    <h2>Live map <span class="hint">UAVs, PoIs, relay links, obstacles - zoom with +/-</span></h2>
+    <div id="map"></div>
+    <div class="legend">
+      <span><i style="background:#4fc3f7"></i>survey</span>
+      <span><i style="background:#b083f0"></i>relay</span>
+      <span><i style="background:#8b98a8"></i>idle</span>
+      <span><i style="background:#52d18b"></i>backup</span>
+      <span><i style="background:#f2c14e"></i>returning</span>
+      <span><i style="background:#6b7a8d"></i>charging</span>
+      <span><i style="background:#ff6b6b"></i>lost</span>
+    </div>
+  </section>
+
+  <section class="panel metrics-panel">
+    <h2>Mission metrics</h2>
+    <div id="metrics" class="metrics"></div>
+  </section>
+
+  <section class="panel charts-panel">
+    <h2>Over time <span class="hint">the resilience story as it happens</span></h2>
+    <div id="charts" class="charts"></div>
+  </section>
+
+  <section class="panel table-panel">
+    <h2>UAVs <span class="hint">click a row to select</span></h2>
+    <div class="table-scroll">
+      <table id="uav-table">
+        <thead><tr>
+          <th>UAV</th><th>role</th><th>mode</th><th>task</th><th>bat %</th>
+          <th>route</th><th>PDR</th><th>lat ms</th><th>alt</th>
+          <th>spd</th><th>hdg</th><th>radio</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel network-panel">
+    <h2>Communication network <span class="hint">GCS = node 0, thickness = link quality</span></h2>
+    <div id="network"></div>
+  </section>
+
+  <section class="panel control-panel">
+    <h2>Operator controls <span class="hint">inject events live</span></h2>
+    <div class="buttons">
+      <button data-act="degrade">Degrade critical relay</button>
+      <button data-act="restore">Restore radios</button>
+      <button data-act="fail">Fail critical relay</button>
+      <button data-act="debris">Debris on backbone</button>
+      <button data-act="clear">Clear obstacles</button>
+      <button data-act="urgent">New urgent PoI</button>
+      <button data-act="drain">Drain selected UAV</button>
+    </div>
+    <p id="selected-uav" class="note">no UAV selected</p>
+    <div id="incidents"></div>
+  </section>
+
+  <section class="panel log-panel">
+    <h2>Event log <label class="check inline"><input type="checkbox" id="important-only" checked> important only</label></h2>
+    <div id="log" class="log"></div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="/static/map.js"></script>
+<script src="/static/network.js"></script>
+<script src="/static/charts.js"></script>
+<script src="/static/builder.js"></script>
+<script src="/static/studio.js"></script>
+</body>
+</html>

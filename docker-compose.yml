@@ -1,0 +1,45 @@
+# Usage:
+#   docker compose up --build -d     start the dashboard demo on http://localhost:8000
+#   docker compose logs -f           watch the mission unfold
+#   docker compose down              stop it
+#
+# Single service on purpose: one container is one simulation with one shared
+# world, so there is nothing here to replicate. See the note in the Dockerfile.
+
+services:
+  swarm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: uav-swarm:latest
+    container_name: uav-swarm
+    
+    # Bound to 127.0.0.1 by default so the unauthenticated /api/inject endpoint
+    # is not exposed to your network. To share on a LAN, override for one run:
+    #
+    #   BIND_ADDR=0.0.0.0 docker compose up --build -d
+    #
+    # Put auth in front of it before exposing it to the internet.
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
+    
+    # Keep run output (events.jsonl, timeseries.csv, summary.json, runs.sqlite)
+    # after the container is removed. Drop --no-results from the command below
+    # for this to receive anything.
+    volumes:
+      - ./results:/app/results
+    
+    restart: unless-stopped
+    
+    # Health check inherited from Dockerfile; adjust if using custom commands
+    # healthcheck:
+    #   test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/state', timeout=4).read(1)"]
+    #   interval: 30s
+    #   timeout: 5s
+    #   start_period: 20s
+    #   retries: 3
+
+    # The default CMD writes nothing to disk. To persist a run instead:
+    # command: >
+    #   python main.py --dashboard --host 0.0.0.0 --port 8000
+    #   --realtime --keep-running --duration 3600 --quiet

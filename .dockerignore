@@ -1,0 +1,47 @@
+# Keep the build context small and the image reproducible.
+# Without this the 273 MB .venv/ is uploaded to the daemon on every build.
+
+# ---- Virtual environments (rebuilt inside the image) ----
+.venv/
+venv/
+env/
+
+# ---- Version control / CI ----
+.git/
+.gitattributes
+.github/
+
+# ---- Python caches ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Generated run output (mounted as a volume instead) ----
+results/*
+!results/.gitkeep
+*.sqlite
+*.sqlite3
+*.db
+
+# ---- Editor / OS junk ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- Local backups / archives ----
+*.zip
+*.tar.gz
+_backup_*
+
+# ---- Secrets (never bake these into an image) ----
+.env
+.env.*
+*.pem
+*.key

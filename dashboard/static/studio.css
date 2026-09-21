@@ -1,0 +1,117 @@
+/* Mission studio: the builder view, the live control bar and the chart strips.
+   Layered on top of style.css, which owns the colour tokens and panel styling. */
+
+/* style.css sets `main { display: grid }`, which outranks the user-agent rule
+   for [hidden] and would leave both views stacked on the page. */
+[hidden] { display: none !important; }
+
+/* ------------------------------------------------------------------ layouts */
+#builder-view {
+  grid-template-columns: 1.55fr 1fr;
+  grid-template-areas: "bmap bform";
+  align-items: start;
+}
+.builder-map-panel { grid-area: bmap; }
+.builder-form-panel { grid-area: bform; }
+
+#live-view {
+  grid-template-columns: 1.55fr 1fr;
+  grid-template-areas:
+    "bar bar"
+    "map metrics"
+    "map charts"
+    "table charts"
+    "table controls"
+    "network controls"
+    "log log";
+}
+.control-bar { grid-area: bar; }
+.charts-panel { grid-area: charts; }
+
+@media (max-width: 1100px) {
+  #builder-view { grid-template-columns: 1fr; grid-template-areas: "bmap" "bform"; }
+  #live-view {
+    grid-template-columns: 1fr;
+    grid-template-areas: "bar" "map" "metrics" "charts" "table" "network" "controls" "log";
+  }
+}
+
+/* --------------------------------------------------------------- builder map */
+#builder-map { height: 62vh; min-height: 420px; border-radius: 8px; overflow: hidden; }
+.gcs-tip { background: rgba(22,27,35,.9); color: var(--text); border: 1px solid var(--line); font-size: 11px; }
+.gcs-tip::before { display: none; }
+
+/* -------------------------------------------------------------- builder form */
+.field { display: block; margin: 0 0 12px; }
+.field > span { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.field > span b { color: var(--text); font-variant-numeric: tabular-nums; }
+.field input[type="range"] { width: 100%; accent-color: var(--accent); }
+.field input[type="number"], .field select {
+  width: 100%; padding: 6px 8px; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; font: inherit;
+}
+.check { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+.check.inline { display: inline-flex; margin: 0 0 0 10px; text-transform: none; letter-spacing: 0; }
+h3 { margin: 16px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+h3 .hint { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+.hint { color: var(--muted); font-size: 12px; font-weight: 400; }
+.note { color: var(--muted); font-size: 12px; margin: 6px 0; }
+.error { color: var(--bad); font-size: 12px; margin: 8px 0 0; min-height: 16px; }
+
+button {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 7px 12px; font: inherit; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary {
+  width: 100%; margin-top: 14px; padding: 10px; font-weight: 600;
+  background: var(--accent); color: #06121a; border-color: var(--accent);
+}
+button.ghost { background: transparent; }
+button.tiny { padding: 2px 8px; font-size: 12px; line-height: 1.4; }
+
+/* ---------------------------------------------------------------- PoI list */
+.poi-list { display: grid; gap: 6px; max-height: 190px; overflow-y: auto; }
+.poi-row {
+  display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
+}
+.poi-row .coords { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.poi-row select { background: var(--bg); color: var(--text); border: 1px solid var(--line);
+                  border-radius: 4px; font: inherit; font-size: 12px; padding: 1px 4px; }
+
+/* ------------------------------------------------------------ session list */
+.session-list { display: grid; gap: 6px; }
+.session-row {
+  display: grid; grid-template-columns: auto auto 1fr auto; gap: 8px; align-items: center;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
+}
+.pill.running  { background: rgba(82,209,139,.18); color: var(--good); }
+.pill.paused   { background: rgba(242,193,78,.18); color: var(--warn); }
+.pill.finished { background: rgba(139,152,168,.18); color: var(--muted); }
+.pill.error    { background: rgba(255,107,107,.18); color: var(--bad); }
+.pill.idle     { background: rgba(139,152,168,.18); color: var(--muted); }
+
+/* ------------------------------------------------------------- control bar */
+.control-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.control-bar .spacer { flex: 1; }
+.inline-speed { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.inline-speed b { color: var(--text); font-variant-numeric: tabular-nums; min-width: 26px; }
+.inline-speed input[type="range"] { width: 130px; accent-color: var(--accent); }
+
+/* ----------------------------------------------------------------- charts */
+.charts { display: grid; gap: 8px; }
+.strip {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  height: 78px; padding: 2px;
+}
+.strip canvas { width: 100%; height: 100%; display: block; }
+
+/* ----------------------------------------------------- live table additions */
+.table-scroll { max-height: 340px; overflow-y: auto; }
+.bad { color: var(--bad); }
+.incident { font-size: 12px; color: var(--muted); border-left: 2px solid var(--line);
+            padding: 3px 8px; margin-top: 6px; }
+.incident.open { border-left-color: var(--warn); color: var(--text); }
+.log:not(.show-all) .line.quiet { display: none; }

@@ -148,8 +148,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         sim.world.events.subscribe(printer)
 
     if server is not None:
-        url = server.start()
+        server.start()
+        url = server.shareable_url
         print(f"Dashboard: {url}")
+        if server.serves_network:
+            print("  Reachable from other machines on this network at the address above.")
+            print("  Windows blocks the port until you allow it once - see docs/running.md.")
         if args.open:
             webbrowser.open(url)
     if gateway is not None:
