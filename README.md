@@ -32,7 +32,7 @@ python main.py                     # headless full-demo scenario, prints events 
 python main.py --demo              # dashboard + MAVLink + real time (what to record for the video)
 python main.py --dashboard --realtime --speed 4
 python main.py --scenario scenarios/network_degradation.yaml --mode baseline
-python -m pytest -q                # 137 tests
+python -m pytest -q                # 164 tests
 ```
 
 Useful flags: `--mode adaptive|baseline`, `--duration`, `--seed`, `--quiet`, `--all-events`,
@@ -51,15 +51,29 @@ Interest and set their priorities, pick adaptive or baseline, then launch. Pause
 and change speed while it runs; live charts plot connectivity, route PDR, latency and imagery
 delivery over time, so a relay failure and the recovery are visible as they happen. Sessions are
 independent worlds in their own threads, and the URL (`/?session=<id>`) can be shared so several
-people watch or drive the same mission. Full guide: [docs/running.md](docs/running.md).
+people watch or drive the same mission. **Download data** saves the finished run - summary,
+timeseries, events and the mission that produced them - as a zip, which for a studio session is the
+only copy, since sessions keep nothing on disk. Full guide: [docs/running.md](docs/running.md).
+
+### Deploy
+
+`render.yaml` publishes the mission studio to [Render](https://render.com) from the existing
+`Dockerfile` - push to GitHub, create a Blueprint Instance, and the studio is live on a public URL.
+`HOST`, `PORT`, `MAX_SESSIONS` and `IDLE_TIMEOUT` are read from the environment for hosts that
+start the container themselves. Netlify, Vercel and GitHub Pages **cannot** run this: it needs
+WebSockets, simulation threads that live for minutes, and worlds held in RAM between requests,
+and serverless platforms provide none of the three. Any container host works instead - Render,
+Hugging Face Spaces, Railway, Fly.io. Deployed studios have no authentication; see
+[docs/running.md](docs/running.md#path-c--deploy-on-the-internet-render).
 
 ### Dashboard
 
 `--dashboard` serves <http://127.0.0.1:8000>: live map (UAVs, PoIs, relay links, obstacles),
 UAV table, communication graph, event log, metrics, and operator buttons that inject faults into
 the running simulation (degrade a relay's radio, drop debris on the backbone, add an urgent PoI,
-drain a battery, fail a UAV). One shared simulation, driven from the command line - use the
-mission studio when people need their own.
+drain a battery, fail a UAV). **Download data** in the header saves the same archive the studio
+offers, which is the way to keep a run started with `--no-results`. One shared simulation, driven
+from the command line - use the mission studio when people need their own.
 
 ### Mission Planner
 
@@ -101,11 +115,11 @@ simulation/             physics: radio channel, obstacles, battery estimates, im
 swarm/                  decisions: allocation, relays, routing, roles, energy, priority, safety,
                         reconfiguration, mission_manager
 telemetry/              MAVLink gateway, message builders, coordinate conversion, rate scheduler
-dashboard/              mission studio (sessions, mission builder, charts) + FastAPI/WebSocket server
+dashboard/              mission studio (sessions, builder, charts, run download) + FastAPI/WebSocket
 swarm_logging/          event log files, metrics, SQLite database
 scenarios/              one file per demonstration scenario
 experiments/            batch runs and figures
-tests/                  137 tests across all layers
+tests/                  164 tests across all layers
 docs/                   architecture, Mission Planner guide, proposal outline, demo script
 ```
 

@@ -1,13 +1,15 @@
 # Running the simulation
 
-Three ways to run this project.
+Four ways to run this project.
 
 - **Mission studio** — the multi-user web app. Design a mission in the browser,
   run it, and let several people each drive their own. Start here if you want
   people to *use* the simulation rather than watch one fixed demo.
 - **Path A (local Python)** — one shared simulation from the command line. The
   only way to reach Mission Planner, and what the demo video is recorded with.
-- **Path B (Docker)** — a clean, reproducible box for deployment.
+- **Path B (Docker)** — a clean, reproducible box on your own machine.
+- **Path C (Render)** — a public URL, so anyone can open the mission studio.
+  Netlify and Vercel cannot host this; Path C explains why.
 
 Every command below has been run on Windows 11 with Python 3.12 and verified.
 
@@ -54,6 +56,11 @@ python -m dashboard.server --max-sessions 4             # bound concurrent world
 python -m dashboard.server --idle-timeout 600           # reap unwatched runs sooner
 ```
 
+Each of those also reads an environment variable — `HOST`, `PORT`,
+`MAX_SESSIONS`, `IDLE_TIMEOUT` — because a hosting platform starts the container
+itself and never gives you the chance to pass a flag. A flag always wins over the
+environment, so local use is unchanged.
+
 Limits exist because the server is shared: at most 40 UAVs, 25 PoIs and one hour
 of mission time per session, and `--max-sessions` (default 8) simultaneous
 worlds. Idle sessions are reaped after 30 minutes.
@@ -63,6 +70,53 @@ worlds. Idle sessions are reaped after 30 minutes.
 > reverse proxy with a login in front of it before exposing it to the internet.
 
 Mission Planner is not available in studio mode; use Path A for MAVLink.
+
+---
+
+## Getting the data out of a run
+
+Both dashboards have a **Download data** button — in the studio's control bar,
+and in the header of `main.py --dashboard`. It saves the run as one zip:
+
+```
+20260923_131433_custom_adaptive_a6d5c6c50666/
+  summary.json      the grouped metrics: mission, communication, resilience, safety, efficiency
+  timeseries.csv    one row per second: connectivity, PDR, latency, battery, PoIs, incidents
+  events.csv        every event, spreadsheet friendly
+  events.jsonl      every event, full detail including the data payload
+  scenario.json     what was run — and for a studio run, the mission you built
+  manifest.json     when it was exported, how many events, and whether any were lost
+```
+
+Those are the same file names and columns a `results/<run>/` directory uses, so
+anything that reads one reads the other — `experiments/plot_results.py`, a
+spreadsheet, or pandas:
+
+```python
+import pandas as pd
+ts = pd.read_csv("20260923_131433_custom_adaptive_a6d5c6c50666/timeseries.csv")
+ts.plot(x="t_s", y=["connectivity_ratio", "mean_route_pdr"])
+```
+
+**For a studio session this is the only copy.** Sessions deliberately write
+nothing to disk — a shared server would accumulate a run directory per visitor —
+and an idle session is reaped after 30 minutes, taking its data with it. Download
+before you close the tab. The button turns green when the run finishes.
+
+**For `main.py`, the same data is already on disk** under `results/<run>/`,
+written automatically at the end of every run. The button matters there when you
+started with `--no-results`, or when the browser is not on the machine running
+the simulation.
+
+You can download a run that is still going; `manifest.json` records
+`"run_finished": false` so a half-run is never mistaken for a complete one.
+
+> **A note on completeness.** The event log in the archive is the whole run. It
+> is recorded separately for this purpose, because the two buffers the dashboard
+> uses to draw itself are both bounded ring buffers — 2000 events in the
+> `EventBus`, 500 in the `LiveHub` — and on a long run each holds only the tail.
+> If anything is ever dropped, `manifest.json` reports `events_dropped` and sets
+> `"complete": false` rather than presenting a partial log as a whole one.
 
 ---
 
@@ -192,6 +246,89 @@ leave it running it will come back every time Docker Desktop starts.
   `command:` block in `docker-compose.yml`.
 - One container is one simulation with one shared world. Do not run replicas —
   a second container is a second, unrelated mission.
+
+---
+
+## Path C — Deploy on the internet (Render)
+
+Gives you a public URL anyone can open. Uses `render.yaml` and the existing
+`Dockerfile`, and runs the **mission studio**, so every visitor builds and drives
+their own mission.
+
+### Why not Netlify, Vercel or GitHub Pages
+
+They host static files and short-lived serverless functions. This project is
+none of those things, and three separate parts of it cannot survive there:
+
+| What the project does | What serverless gives you |
+|---|---|
+| Streams live state over a WebSocket (`/ws/{id}`) | No WebSocket support |
+| Runs a simulation thread for minutes, stepping at `dt=0.1 s` | Function killed after ~10 s |
+| Keeps live worlds in RAM between requests (`SessionManager`) | Nothing shared between invocations |
+
+Netlify also no longer offers a Python runtime for functions. There is no
+combination of config files that makes `python -m dashboard.server` run there —
+you need a host that runs a container, which is what Render does.
+
+### 1. Push to GitHub
+
+Render deploys from a repository, so your code has to be on GitHub first.
+
+```bash
+git add -A
+git commit -m "Add Render deployment"
+git push
+```
+
+### 2. Create the service
+
+1. Go to <https://dashboard.render.com/blueprints>
+2. Click **New Blueprint Instance**
+3. Pick this repository. Render finds `render.yaml` by itself.
+4. Click **Apply**
+
+The first build takes roughly 5–10 minutes, most of it installing matplotlib.
+
+### 3. Open it
+
+Render gives you a URL like `https://uav-swarm-studio.onrender.com`. Open it and
+you get the mission studio — place PoIs, pick a UAV count, launch.
+
+### What the free plan costs you
+
+The free instance is **0.1 CPU and 512 MB RAM**, and it **sleeps after 15 minutes
+of no traffic**. That has three consequences worth knowing before you demo it:
+
+- **First visit after a sleep takes ~50 seconds** while the container wakes. It
+  looks broken. It is not — wake it yourself a minute before showing anyone.
+- **Sleeping kills every running simulation.** Sessions live in RAM, so they do
+  not survive. This is fine for a demo and wrong for anything you care about.
+- **High speed multipliers will stutter.** 0.1 CPU is a tenth of a core, and
+  `speed 20` asks for 200 physics steps a second. Keep demo missions at speed
+  1–4, or upgrade to the Starter plan for a full CPU.
+
+`render.yaml` therefore sets `MAX_SESSIONS=2` and `IDLE_TIMEOUT=600`, not the
+code defaults of 8 and 1800. Raise both if you pay for a bigger instance.
+
+> **Security — read this before you share the link.** The studio has **no
+> authentication**. On the public internet that means anyone who finds the URL
+> can start simulations, inject faults and drain your 2 session slots. The action
+> list is whitelisted and every parameter is validated, so there is no arbitrary
+> code path, but there is nothing stopping someone from disrupting your demo.
+> Treat the URL as semi-private, or put Render's password protection (a paid
+> feature) or an authenticating reverse proxy in front of it.
+
+### Other hosts that work
+
+Anything that runs a container with WebSockets will do. The same `Dockerfile`
+and the same `HOST` / `PORT` / `MAX_SESSIONS` environment variables apply:
+
+- **Hugging Face Spaces** — free, Docker SDK. Set `app_port: 8000` in the Space
+  README's frontmatter and add `HOST=0.0.0.0` as a Space variable.
+- **Railway** / **Fly.io** — both inject `PORT` and need `HOST=0.0.0.0`.
+
+Mission Planner is not reachable on any of these — MAVLink is UDP pushed to a
+target address, which does not cross a hosting boundary. Use Path A for MAVLink.
 
 ---
 

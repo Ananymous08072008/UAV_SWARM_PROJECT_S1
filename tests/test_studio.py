@@ -8,14 +8,19 @@ by test_dashboard.py and must keep working unchanged.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from core.config import ConfigError
 from dashboard.api import create_app
 from dashboard.mission import MAX_POIS, MAX_UAVS, build_scenario, limits
+from dashboard.server import parse_args
 from dashboard.session import SessionError, SessionManager
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # A mission small and short enough that a test never waits on physics.
 SPEC = {"uav_count": 4, "duration_s": 60.0, "speed": 20.0,
@@ -277,6 +282,53 @@ def test_studio_page_and_its_assets_are_served(client):
     assert "mission studio" in client.get("/").text
     for asset in ("studio.js", "studio.css", "builder.js", "charts.js"):
         assert client.get(f"/static/{asset}").status_code == 200
+
+
+# -------------------------------------------------------------------- deployment
+def test_server_reads_the_port_a_hosting_platform_injects(monkeypatch):
+    # Render, Railway and Fly start the container themselves and pass PORT in the
+    # environment. There is no command line to add a flag to, so binding the
+    # wrong port here means the platform's proxy never reaches the app.
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.setenv("PORT", "10000")
+    monkeypatch.setenv("MAX_SESSIONS", "2")
+    monkeypatch.setenv("IDLE_TIMEOUT", "600")
+    args = parse_args([])
+    assert (args.host, args.port) == ("0.0.0.0", 10000)
+    assert args.max_sessions == 2
+    assert args.idle_timeout == 600.0
+
+
+def test_an_explicit_flag_still_beats_the_environment(monkeypatch):
+    monkeypatch.setenv("PORT", "10000")
+    assert parse_args(["--port", "8080"]).port == 8080
+
+
+def test_local_defaults_survive_an_empty_environment(monkeypatch):
+    for key in ("HOST", "PORT", "MAX_SESSIONS", "IDLE_TIMEOUT"):
+        monkeypatch.delenv(key, raising=False)
+    args = parse_args([])
+    assert (args.host, args.port) == ("127.0.0.1", 8000)
+
+
+def test_the_render_health_check_path_answers_in_studio_mode(client):
+    # /api/state is registered only when a LiveHub is passed, so it 404s under
+    # `python -m dashboard.server`. Pointing Render at it would fail the health
+    # check and roll back every deploy.
+    spec = yaml.safe_load((PROJECT_ROOT / "render.yaml").read_text())
+    assert client.get(spec["services"][0]["healthCheckPath"]).status_code == 200
+    assert client.get("/api/state").status_code == 404
+
+
+def test_render_runs_the_studio_and_binds_every_interface():
+    service = yaml.safe_load((PROJECT_ROOT / "render.yaml").read_text())["services"][0]
+    env = {var["key"]: var["value"] for var in service["envVars"]}
+    # 127.0.0.1 inside a container is reachable only from that container.
+    assert env["HOST"] == "0.0.0.0"
+    # The Dockerfile's own CMD is the single shared simulation, not the studio.
+    assert service["dockerCommand"] == "python -m dashboard.server"
+    # PORT is assigned by the platform; hard-coding it here overrides that.
+    assert "PORT" not in env
 
 
 def test_session_websocket_streams_state_and_status(client):

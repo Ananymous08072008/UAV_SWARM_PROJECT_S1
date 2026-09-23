@@ -98,6 +98,8 @@ button {
   border-radius: 7px; padding: 7px 11px; cursor: pointer; font-size: 13px;
 }
 button:hover { border-color: var(--accent); color: var(--accent); }
+/* The run has ended; its data lives only in memory until somebody saves it. */
+#btn-download.ready { border-color: var(--good); color: var(--good); }
 .selected { margin-top: 10px; color: var(--muted); font-size: 12px; }
 .incidents { margin-top: 10px; display: grid; gap: 6px; }
 .incident { background: var(--panel-2); border-left: 3px solid var(--warn); border-radius: 6px; padding: 6px 8px; font-size: 12px; }

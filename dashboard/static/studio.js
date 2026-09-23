@@ -238,6 +238,9 @@
     $("h-time").textContent = fmt(status.t_s, 0) + " / " + fmt(status.duration_s, 0) + " s";
     $("btn-pause").textContent = status.state === "paused" ? "Resume" : "Pause";
     $("btn-pause").disabled = (status.state === "finished" || status.state === "error");
+    // The run is over and the session will be reaped when idle, so draw attention
+    // to the only thing that keeps its data.
+    $("btn-download").classList.toggle("ready", status.state === "finished");
     if (String(parseInt($("live-speed").value, 10)) !== String(Math.round(status.speed))) {
       $("live-speed").value = Math.round(status.speed);
       $("live-speed-value").textContent = Math.round(status.speed) + "x";
@@ -261,12 +264,30 @@
     });
   }
 
+  /* Take the run away as a file: summary, timeseries, events and the mission
+     spec. Studio sessions write nothing to disk and are reaped once idle, so
+     this is the only way the data outlives the tab.
+
+     A hidden link rather than fetch(): the response is a normal GET with an
+     attachment disposition, so the browser saves it without leaving the page,
+     and without holding the whole archive in memory as a blob first. */
+  function downloadRun() {
+    if (!sessionId) return;
+    var link = document.createElement("a");
+    link.href = "/api/sessions/" + sessionId + "/export";
+    link.download = "";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
   function bindLiveControls() {
     $("btn-pause").addEventListener("click", function () {
       control($("btn-pause").textContent === "Pause" ? "pause" : "resume");
     });
     $("btn-restart").addEventListener("click", function () { control("restart"); });
     $("btn-stop").addEventListener("click", function () { control("stop"); });
+    $("btn-download").addEventListener("click", downloadRun);
     $("btn-new").addEventListener("click", backToBuilder);
     $("live-speed").addEventListener("input", function () {
       $("live-speed-value").textContent = $("live-speed").value + "x";

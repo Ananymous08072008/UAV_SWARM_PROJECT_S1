@@ -30,6 +30,10 @@ class LiveHub:
         self._version = 0
         self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
         self._commands: "queue.Queue[tuple[str, dict[str, Any]]]" = queue.Queue()
+        # Set once by the Simulation given this hub, before its thread starts, so
+        # the download route can reach the metrics and the full event log. This
+        # deque holds only the last few hundred events and cannot serve as one.
+        self.simulation: Optional[Any] = None
 
     # ---------------------------------------------------- simulation -> browser
     def publish(self, payload: dict[str, Any], events: list[dict[str, Any]]) -> None:

@@ -45,5 +45,8 @@ CMD ["python", "main.py", "--dashboard", "--host", "0.0.0.0", "--port", "8000", 
      "--realtime", "--keep-running", "--duration", "3600", "--quiet", "--no-results"]
 
 # Uses urllib rather than curl, which python:3.12-slim does not ship.
+# Probes /api/actions, not /api/state: create_app only registers /api/state when a
+# LiveHub is present, so it 404s under `python -m dashboard.server` (studio mode).
+# Reads PORT because hosting platforms assign one rather than using 8000.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/state', timeout=4).read(1)" || exit 1
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/api/actions', timeout=4).read(1)" || exit 1

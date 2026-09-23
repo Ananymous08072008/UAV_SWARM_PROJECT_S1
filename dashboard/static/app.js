@@ -127,6 +127,8 @@
     renderIncidents(state);
     swarmMap.update(state);
     network.update(state);
+    document.getElementById("btn-download").classList
+      .toggle("ready", !!(state.scenario && state.scenario.finished));
   }
 
   // ----------------------------------------------------------------- actions
@@ -168,6 +170,18 @@
   };
   Array.prototype.forEach.call(document.querySelectorAll(".controls button"), function (button) {
     button.addEventListener("click", function () { ACTIONS[button.dataset.action](); });
+  });
+
+  /* The run's logs and metrics as one zip. A hidden link rather than fetch():
+     the response is a plain GET with an attachment disposition, so the browser
+     saves it without leaving the page or buffering the archive as a blob. */
+  document.getElementById("btn-download").addEventListener("click", function () {
+    var link = document.createElement("a");
+    link.href = "/api/export";
+    link.download = "";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   });
 
   // ------------------------------------------------------------- live stream

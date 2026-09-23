@@ -40,8 +40,12 @@ def make_world(params: Parameters | None = None, **overrides: Any) -> World:
     return World(params or Parameters(), scenario(**overrides))
 
 
-def make_sim(mode: str = "adaptive", params: Parameters | None = None, **overrides: Any) -> Simulation:
-    return Simulation(params or Parameters(), scenario(**overrides), mode=mode, results_dir=None)
+def make_sim(mode: str = "adaptive", params: Parameters | None = None,
+             hub: Any = None, **overrides: Any) -> Simulation:
+    # hub must be passed to the constructor, not attached afterwards: that is when
+    # the Simulation registers itself for downloads and starts recording events.
+    return Simulation(params or Parameters(), scenario(**overrides), mode=mode,
+                      results_dir=None, hub=hub)
 
 
 def run_until(sim: Simulation, t_s: float) -> None:

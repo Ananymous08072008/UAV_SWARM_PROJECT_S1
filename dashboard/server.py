@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -37,12 +38,17 @@ from dashboard.session import MAX_SESSIONS, SessionManager           # noqa: E40
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="UAV swarm mission studio (multi-session web app)")
     parser.add_argument("--params", type=Path, default=PROJECT_ROOT / "config" / "parameters.yaml")
-    parser.add_argument("--host", default="127.0.0.1",
+    # Hosting platforms (Render, Railway, Fly.io, Spaces) inject PORT and expect the
+    # process to bind it - they start the container, so there is no chance to pass a
+    # flag. These are defaults, so an explicit flag still overrides the environment.
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"),
                         help="0.0.0.0 to accept connections from other machines")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--max-sessions", type=int, default=MAX_SESSIONS,
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
+    parser.add_argument("--max-sessions", type=int,
+                        default=int(os.environ.get("MAX_SESSIONS", MAX_SESSIONS)),
                         help="how many simulations may run at once")
-    parser.add_argument("--idle-timeout", type=float, default=1800.0,
+    parser.add_argument("--idle-timeout", type=float,
+                        default=float(os.environ.get("IDLE_TIMEOUT", "1800")),
                         help="seconds before an unwatched simulation is reaped")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])

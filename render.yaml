@@ -1,0 +1,47 @@
+# Render blueprint - deploys the mission studio as a public web app.
+#
+#   https://dashboard.render.com/blueprints  ->  New Blueprint Instance
+#
+# Render is used rather than Netlify or Vercel because this is not a static site
+# and not a serverless function. It is a long-lived Python process: every session
+# runs a physics simulation in its own thread and streams state over a WebSocket.
+# Serverless platforms kill an invocation in seconds, forbid WebSockets and share
+# no memory between calls, so none of that survives there.
+#
+# This runs `python -m dashboard.server` (mission studio - every visitor builds
+# their own mission), NOT the Dockerfile's default CMD (one shared simulation).
+
+services:
+  - type: web
+    name: uav-swarm-studio
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m dashboard.server
+
+    # /api/actions, not /api/state: create_app registers /api/state only when a
+    # LiveHub is passed, so it 404s in studio mode and Render would mark every
+    # deploy unhealthy and roll it back.
+    healthCheckPath: /api/actions
+
+    envVars:
+      # Mandatory in a container. The 127.0.0.1 default binds the loopback
+      # interface only, so Render's proxy could not reach the app at all.
+      - key: HOST
+        value: 0.0.0.0
+
+      # The free instance is 0.1 CPU / 512 MB, and each session is a thread
+      # stepping physics at dt=0.1s. Two concurrent worlds is what that holds;
+      # the code's own default of 8 would swap and stall. Raise this if you
+      # upgrade the plan.
+      - key: MAX_SESSIONS
+        value: "2"
+
+      # Reap abandoned simulations after 10 minutes instead of 30. On two slots
+      # a forgotten tab is the difference between the site working and a
+      # stranger seeing "server is at capacity".
+      - key: IDLE_TIMEOUT
+        value: "600"
+
+    # PORT is injected by Render and read by dashboard/server.py. Do not set it.

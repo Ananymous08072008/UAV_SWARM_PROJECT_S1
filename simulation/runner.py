@@ -36,6 +36,11 @@ if TYPE_CHECKING:
     from dashboard.websocket import LiveHub
     from telemetry.mavlink_gateway import MavlinkGateway
 
+# Ceiling on the in-memory event log kept for dashboard downloads. A full-length
+# mission produces a few tens of thousands of events, so this only ever catches a
+# runaway session on a shared server - and the export reports what it dropped.
+MAX_EXPORT_EVENTS = 200_000
+
 
 class Simulation:
     def __init__(self, params: Parameters, scenario: ScenarioConfig, mode: str = "adaptive",
@@ -63,6 +68,15 @@ class Simulation:
             self.logger = EventLogger(self.run_dir, self.world.events)
             self.db = RunDatabase(Path(results_dir) / "runs.sqlite")
             self.run_id = self.db.start_run(scenario.name, mode, self.world.seed)
+        elif hub is not None:
+            # Nothing is going to disk, but a dashboard run still has to be
+            # downloadable afterwards. Record in memory only - the EventBus keeps
+            # its last 2000 events, which is the tail of a run, not a run.
+            self.logger = EventLogger(None, self.world.events, max_records=MAX_EXPORT_EVENTS)
+        if hub is not None:
+            # Lets the web thread build the download without main.py having to
+            # hand the Simulation to the server it created before this existed.
+            hub.simulation = self
 
     @classmethod
     def from_files(cls, parameters_path: str | Path, scenario_path: str | Path, **kwargs) -> "Simulation":

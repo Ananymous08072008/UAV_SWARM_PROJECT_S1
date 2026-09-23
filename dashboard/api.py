@@ -10,6 +10,7 @@ Single simulation (``main.py --dashboard``) - one world, one shared view:
     GET  /api/state        latest world + network + metrics snapshot (JSON)
     GET  /api/events?since event log since a sequence number
     POST /api/inject       operator action: {"action": "...", "params": {...}}
+    GET  /api/export       this run's logs and metrics as a zip
     WS   /ws               live stream of state + events
 
 Multi session (``python -m dashboard.server``) - one world per visitor, built
@@ -25,6 +26,7 @@ and driven from the browser:
     GET    /api/sessions/{id}/events  event log since a sequence number
     POST   /api/sessions/{id}/control start|pause|resume|stop|restart|speed
     POST   /api/sessions/{id}/inject  operator action, scoped to that world
+    GET    /api/sessions/{id}/export  that run's logs and metrics as a zip
     WS     /ws/{id}                   live stream for that simulation
 
 In single-simulation mode the server runs in a daemon thread so the simulation
@@ -44,10 +46,11 @@ from typing import Any, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core.config import ConfigError
+from dashboard.export import build_archive
 from dashboard.websocket import ALLOWED_ACTIONS, LiveHub, stream_state
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -85,6 +88,20 @@ def shareable_url(host: str, port: int) -> str:
     if host in WILDCARD_HOSTS:
         return f"http://{lan_address()}:{port}"
     return f"http://{host}:{port}"
+
+
+def _archive_response(sim, session_id: Optional[str] = None,
+                      spec: Optional[dict[str, Any]] = None,
+                      extra: Optional[dict[str, Any]] = None) -> Response:
+    """Serve one run's logs and metrics as a zip the browser downloads."""
+    if sim is None:
+        raise HTTPException(status_code=409,
+                            detail="no simulation is attached to this dashboard")
+    filename, blob = build_archive(sim, session_id=session_id, spec=spec, extra=extra)
+    # filename is assembled from a timestamp and export.safe_name(), so it cannot
+    # break out of the quoted header value.
+    return Response(content=blob, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 def _inject(hub: LiveHub, body: dict[str, Any]) -> dict[str, Any]:
@@ -134,6 +151,10 @@ def create_app(hub: Optional[LiveHub] = None, push_interval_s: float = 0.2,
         @app.post("/api/inject")
         def inject(body: dict[str, Any]) -> JSONResponse:
             return JSONResponse(_inject(hub, body))
+
+        @app.get("/api/export")
+        def export() -> Response:
+            return _archive_response(hub.simulation)
 
         @app.websocket("/ws")
         async def ws(websocket: WebSocket) -> None:
@@ -215,6 +236,18 @@ def create_app(hub: Optional[LiveHub] = None, push_interval_s: float = 0.2,
                  "pdr": r["mean_route_pdr"],
                  "latency": r["mean_latency_ms"]}
                 for r in rows]})
+
+        @app.get("/api/sessions/{session_id}/export")
+        def session_export(session_id: str) -> Response:
+            """This run's logs and metrics as a zip, for evaluation afterwards.
+
+            Studio sessions write nothing to disk, so this is the only way their
+            data leaves the server - and the session is reaped when idle.
+            """
+            session = _session(session_id)
+            return _archive_response(session.sim, session_id=session.id, spec=session.spec,
+                                     extra={"state": session.state,
+                                            "generation": session.generation})
 
         @app.post("/api/sessions/{session_id}/inject")
         def session_inject(session_id: str, body: dict[str, Any]) -> JSONResponse:
