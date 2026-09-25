@@ -172,9 +172,9 @@
     button.addEventListener("click", function () { ACTIONS[button.dataset.action](); });
   });
 
-  /* The run's logs and metrics as one zip. A hidden link rather than fetch():
-     the response is a plain GET with an attachment disposition, so the browser
-     saves it without leaving the page or buffering the archive as a blob. */
+  /* The run's mission metrics and event log as an Excel workbook. A hidden link
+     rather than fetch(): the response is a plain GET with an attachment
+     disposition, so the browser saves it without leaving the page. */
   document.getElementById("btn-download").addEventListener("click", function () {
     var link = document.createElement("a");
     link.href = "/api/export";

@@ -3,7 +3,7 @@
 scenario:
   name: new_priority_poi
   description: >
-    Five UAVs are fully committed (two surveys plus the relays that keep them connected)
+    Seven UAVs are fully committed (two surveys plus the relays that keep them connected)
     when a priority-5 region appears at t = 120 s. Measures the response time to it.
   duration_s: 600.0
   seed: 42
@@ -20,10 +20,10 @@ gcs:
 disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
 
 uavs:
-  count: 5
+  count: 7                        # 2 surveyors + their 5 relays: no spare when the urgent PoI appears
   formation: grid
   per_row: 3
-  spacing_m: 15.0
+  spacing_m: 30.0                 # >= swarm.safety.min_separation_m, or neighbours collide on take-off
   start_m: [-20.0, -40.0]
   initial_battery_pct: 100.0
 

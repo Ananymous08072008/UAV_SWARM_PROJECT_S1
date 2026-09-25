@@ -3,7 +3,7 @@ swarm/role_manager.py
 The single place where swarm modules change UAV roles.
 
 It checks role transitions against an allowed table, applies safe altitudes
-(layers + obstacle clearance) to every waypoint, and forwards the change to
+(flight levels + obstacle clearance) to every waypoint, and forwards the change to
 the World command API, which validates it again and publishes events.
 
     IDLE <-> SURVEY <-> RELAY <-> BACKUP  --(energy / deadline)-->  RETURNING -> CHARGING -> IDLE
@@ -49,13 +49,12 @@ class RoleManager:
 
     def assign_survey(self, uav: UAV, poi: "PoI", reason: str) -> None:
         self._require(uav, R.SURVEY)
-        base = poi.altitude_m or 0.0   # a PoI may ask for a higher altitude
-        alt = self.safety.safe_altitude(uav, poi.position, base)
+        alt = self.safety.safe_altitude(uav, poi.position, poi.altitude_m)   # a PoI may ask for its own altitude
         self.world.assign_poi(uav.uav_id, poi.poi_id, reason, altitude_m=alt)
 
     def assign_relay(self, uav: UAV, point: Sequence[float], reason: str, serves: Sequence[str] = ()) -> None:
         self._require(uav, R.RELAY)
-        alt = self.safety.safe_altitude(uav, point)
+        alt = self.safety.safe_altitude(uav, point, point[2] if len(point) > 2 else None)
         target = np.array([point[0], point[1], alt])
         new_relay = uav.role is not R.RELAY
         if new_relay:
@@ -70,7 +69,7 @@ class RoleManager:
 
     def make_backup(self, uav: UAV, point: Sequence[float], reason: str) -> None:
         self._require(uav, R.BACKUP)
-        alt = self.safety.safe_altitude(uav, point)
+        alt = self.safety.safe_altitude(uav, point, point[2] if len(point) > 2 else None)
         if uav.role is not R.BACKUP:
             self.world.set_role(uav.uav_id, R.BACKUP, reason)
         self.world.goto(uav.uav_id, (point[0], point[1], alt), reason)
@@ -88,7 +87,7 @@ class RoleManager:
             return
         was_relay = uav.role is R.RELAY
         self._require(uav, R.RETURNING)
-        alt = self.safety.safe_altitude(uav, uav.home)
+        alt = self.safety.safe_altitude(uav, uav.home, self.world.params.uav.rth_altitude_m)
         self.world.return_home(uav.uav_id, reason, altitude_m=alt)
         if was_relay:
             self.world.publish(EventType.RELAY_RELEASED, f"{uav.name} left the RELAY role [{reason}]",

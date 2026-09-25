@@ -1,8 +1,9 @@
 # =====================================================================
 # Full demonstration scenario - earthquake / landslide response
 # ---------------------------------------------------------------------
-# The GCS sits outside the disaster area. Ten UAVs survey PoIs deep
+# The GCS sits outside the disaster area. The swarm surveys PoIs deep
 # inside it, so survey UAVs can only reach the GCS through relay chains.
+# The fleet is sized to each run's PoIs (uavs.count: auto).
 # The timeline injects all five demonstration events in one run.
 # Focused single-event scenarios live in scenarios/.
 # =====================================================================
@@ -10,12 +11,15 @@
 scenario:
   name: full_demo
   description: >
-    Twelve UAVs survey six PoIs in a disaster area 0.4-1.2 km from the GCS.
-    The run contains radio degradation, an obstacle across the relay
-    backbone, an early PoI completion, a new high-priority region, a UAV
-    loss and a battery-driven relay handover.
-  duration_s: 1200.0
-  seed: 42
+    A fleet sized to the mission surveys 4-8 randomly placed PoIs in a
+    disaster area 0.3-1.2 km from the GCS. The run contains radio degradation, an obstacle across the
+    relay backbone, an early PoI completion, a new high-priority region, a UAV
+    loss and a battery-driven relay handover, each at a random time within
+    its window.
+  duration_s: 2700.0
+  # "random" draws a new seed every run. It is printed at start-up and saved
+  # in summary.json; `python main.py --seed N` replays that exact run.
+  seed: random
 
 area:
   x_min_m: -200.0
@@ -29,73 +33,72 @@ gcs:
 # Rough outline of the disaster area (drawn on the dashboard map).
 disaster_zone: [[300, -50], [1200, -50], [1200, 1000], [250, 1000]]
 
+# count: auto sizes the fleet to the mission: the fewest surveyors that finish
+# every PoI in time (one after another by priority), the relays that keep the
+# highest-priority PoIs connected to the GCS, spares, and a reserve for the scheduled
+# UAV loss and new PoI below (tuned in parameters.yaml, swarm.fleet). A number
+# instead fixes the fleet, e.g. for experiments that compare fleet sizes.
 uavs:
-  count: 12
+  count: auto
+  max_count: 40
   formation: grid
   per_row: 6
-  spacing_m: 15.0
+  spacing_m: 30.0                 # >= swarm.safety.min_separation_m, or neighbours collide on take-off
   start_m: [-30.0, -50.0]
   initial_battery_pct: 100.0
   battery_overrides: {}
 
-pois:
-  - id: POI-1
-    position_m: [400.0, 150.0]
-    priority: 3
-    survey_time_s: 60.0
-  - id: POI-2
-    position_m: [620.0, 480.0]
-    priority: 4
-    survey_time_s: 80.0
-  - id: POI-3
-    position_m: [880.0, 200.0]
-    priority: 2
-    survey_time_s: 60.0
-  - id: POI-4
-    position_m: [300.0, 700.0]
-    priority: 3
-    survey_time_s: 70.0
-  - id: POI-5
-    position_m: [900.0, 700.0]
-    priority: 5
-    survey_time_s: 90.0
-  - id: POI-6
-    position_m: [1100.0, 450.0]
-    priority: 2
-    survey_time_s: 50.0
+# No fixed PoIs: every run draws how many there are, where, how urgent and how
+# long each takes to survey.
+pois: []
 
 random_pois:
-  count: 0
+  count: [4, 8]
+  region_m: [300.0, -50.0, 1200.0, 1000.0]   # inside the disaster zone, away from the GCS
+  min_spacing_m: 150.0                        # no two PoIs on top of each other
+  priority: [1, 5]
+  survey_time_s: [45.0, 90.0]
+  margin_m: 20.0
 
 obstacles: []
 
+# Every event fires at a random time inside its [earliest, latest] window, drawn
+# from the run seed. The windows overlap, so the order changes between runs too.
+#
+# Why the windows sit where they do: events aimed at a relay (critical_relay,
+# role:RELAY, backbone_midpoint) need a relay chain to exist. The fleet brings
+# the relays for the first wave of PoIs, so the chain carries traffic from
+# launch while those surveys run. Ending those windows by 150 s means they
+# normally find a target (a windowed trigger also retries briefly if not).
 timeline:
   # Scenario A - the busiest relay's radio degrades
-  - at_s: 80.0
+  - at_s: [70.0, 140.0]
     action: degrade_link
     params: {uav_id: critical_relay, quality: 0.15}
 
-  # Scenario C - a PoI is finished early (enough imagery already collected)
-  - at_s: 150.0
+  # Scenario C - a PoI is finished early (enough imagery already collected);
+  # random_active picks one under survey at that moment
+  - at_s: [90.0, 190.0]
     action: complete_poi
-    params: {poi_id: POI-5}
+    params: {poi_id: random_active}
 
   # Scenario B - debris blocks the longest hop of the relay backbone
-  - at_s: 200.0
+  - at_s: [90.0, 150.0]
     action: add_obstacle
     params: {id: DEBRIS-1, center_m: backbone_midpoint, size_m: 140.0, height_m: 70.0, attenuation_db: 40.0}
 
-  # A new high-priority region emerges (survivors reported) - the swarm launches again
-  - at_s: 260.0
-    action: add_poi
-    params: {id: POI-URGENT, position_m: [250.0, 900.0], priority: 5, survey_time_s: 60.0}
-
-  # A UAV is lost while the new region is being served
-  - at_s: 330.0
+  # A UAV is lost while the relay chain is under strain
+  - at_s: [100.0, 150.0]
     action: fail_uav
     params: {uav_id: critical_relay, reason: "motor failure"}
 
   # A relay runs low on battery -> handover before it returns home
-  - at_s: 380.0
+  - at_s: [110.0, 150.0]
     action: set_battery
     params: {uav_id: "role:RELAY", battery_pct: 19.0}
+
+  # A new high-priority region emerges (survivors reported). Needs no relay, so
+  # it may come after the first wave has finished - the swarm launches again.
+  - at_s: [150.0, 320.0]
+    action: add_poi
+    params: {id: POI-URGENT, position_m: random, priority: 5, survey_time_s: 60.0}

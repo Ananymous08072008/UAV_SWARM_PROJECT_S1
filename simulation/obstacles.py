@@ -184,6 +184,10 @@ class ObstacleField:
     def register_triggers(self, world: "World") -> None:
         from core.world import CommandError
 
+        # A PoI drawn inside debris would be surveyed from inside the obstacle.
+        world.register_placement_filter(
+            lambda x, y: not any(o.contains_xy(x, y) for o in self._obstacles.values()))
+
         def add(trig: Trigger) -> None:
             params = dict(trig.params)
             if "polygon_m" not in params:

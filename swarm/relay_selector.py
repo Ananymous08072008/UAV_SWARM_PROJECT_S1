@@ -39,7 +39,7 @@ GCS_KEY = "GCS"
 
 @dataclass(frozen=True)
 class RelayParams:
-    relay_altitude_m: float = 50.0
+    relay_altitude_m: float = 60.0
     min_planned_pdr: float = 0.85         # every planned hop must predict at least this PDR
     spacing_safety: float = 0.9           # hop length = range_for_pdr(min_planned_pdr) * spacing_safety
     reposition_threshold_m: float = 25.0

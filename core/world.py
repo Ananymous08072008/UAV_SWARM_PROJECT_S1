@@ -18,6 +18,7 @@ what - that belongs to swarm/* (task allocator, relay selector, ...).
 
 from __future__ import annotations
 
+import math
 from dataclasses import fields as dc_fields
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -34,8 +35,24 @@ from core.uav import UAV, CommState, HealthState, UAVRole
 Controller = Callable[["World"], None]
 UAVSelector = Callable[["World"], Optional[int]]
 PointSelector = Callable[["World"], Optional[Any]]
+PlacementFilter = Callable[[float, float], bool]
 
 _BUSY_HOME_ROLES = (UAVRole.RETURNING, UAVRole.CHARGING)
+
+# Trigger values resolved at fire time rather than naming a fixed PoI or place,
+# so a timeline still works when the PoIs themselves are drawn per run.
+RANDOM_ACTIVE_POI = "random_active"      # poi_id: a PoI not yet done, preferring one under survey
+RANDOM_POSITION = "random"               # position_m: a free spot in the random_pois region
+POI_SELECTORS = (RANDOM_ACTIVE_POI,)
+
+_PLACEMENT_TRIES = 200
+_RETRY_S = 2.0      # a windowed trigger whose target does not exist yet tries again this often
+_RETRY_GRACE_S = 30.0   # ... for up to this long after its window closes (e.g. a relay handover gap)
+
+# Independent random streams per purpose, all derived from the run seed. Keeping
+# them apart means editing the timeline cannot move the PoIs, and vice versa.
+_STREAM_TIMELINE = 202
+_STREAM_TRIGGER_CHOICES = 203
 
 
 class CommandError(ValueError):
@@ -54,14 +71,25 @@ class World:
         self.scenario = scenario
         self.seed = scenario.seed if scenario.seed is not None else params.simulation.seed
         self.rng = np.random.default_rng(self.seed)
+        self._choice_rng = np.random.default_rng([self.seed, _STREAM_TRIGGER_CHOICES])
         self.events = EventBus(params.simulation.event_history)
         self.state = WorldState(
             origin=params.geo_origin,
             area=scenario.area,
             gcs_position=np.array(scenario.gcs.position_m, dtype=float),
         )
+        # The schedule actually used by this run: every [earliest, latest] window
+        # drawn to one time. Published with SIM_STARTED so the log shows it.
+        timeline_rng = np.random.default_rng([self.seed, _STREAM_TIMELINE])
+        self.timeline = tuple(spec.resolve(timeline_rng) for spec in scenario.timeline)
+        # A windowed trigger that finds no target (e.g. no relay while the chain is
+        # being rebuilt) keeps looking until shortly after its window closes. A
+        # fixed-time trigger fires once, exactly as written, and never waits.
+        self._retry_until = {i: spec.latest_s + _RETRY_GRACE_S
+                             for i, spec in enumerate(scenario.timeline) if spec.at_s_max is not None}
+        self._planned_s = {i: spec.at_s for i, spec in enumerate(self.timeline)}
         try:
-            self._triggers = TriggerSchedule.from_specs(scenario.timeline)
+            self._triggers = TriggerSchedule.from_specs(self.timeline)
         except ValueError as exc:
             raise ConfigError(f"scenario '{scenario.name}': {exc}") from exc
         self._trigger_handlers: dict[TriggerAction, TriggerHandler] = {
@@ -74,11 +102,17 @@ class World:
         }
         self._uav_selectors: dict[str, UAVSelector] = {"degraded_radio": _degraded_radio}
         self._point_selectors: dict[str, PointSelector] = {}
+        self._placement_filters: list[PlacementFilter] = []
         self._landing: set[int] = set()  # RETURNING UAVs that reached home altitude and are descending
         self._started = False
         self._stopped = False
-        self._spawn_uavs()
+        # How the fleet size was decided, published with SIM_STARTED. With
+        # ``uavs.count: auto`` the World waits for spawn_fleet(): sizing needs the
+        # radio model and relay planner, which sit above the core layer.
+        self.fleet: dict[str, Any] = {"sizing": "fixed"}
         self._create_pois()
+        if not scenario.uavs.auto:
+            self._spawn_uavs(scenario.uavs.count)
 
     @classmethod
     def from_files(cls, parameters_path: str | Path, scenario_path: str | Path) -> "World":
@@ -113,33 +147,84 @@ class World:
         return self.state.snapshot(self.duration_s, self.events.last_seq)
 
     # --------------------------------------------------------------- building
-    def _spawn_uavs(self) -> None:
+    def _spawn_uavs(self, count: int) -> None:
         spawn = self.scenario.uavs
-        for uav_id, position in enumerate(spawn.spawn_positions(), start=1):
+        for uav_id, position in enumerate(spawn.spawn_positions(count), start=1):
             self.state.add_uav(UAV(uav_id=uav_id, position=position, battery_pct=spawn.battery_for(uav_id)))
+
+    def spawn_fleet(self, count: int, plan: Optional[Mapping[str, Any]] = None) -> None:
+        """Launch-pad a fleet sized for this mission. Only for ``uavs.count: auto``, before start()."""
+        spawn = self.scenario.uavs
+        if not spawn.auto:
+            raise CommandError("the scenario fixes the UAV count; spawn_fleet() is for uavs.count: auto")
+        if self._started or self.state.uavs:
+            raise CommandError("the fleet has already been spawned")
+        if not 1 <= count <= spawn.max_count:
+            raise CommandError(f"fleet size {count} outside 1..{spawn.max_count}")
+        self._spawn_uavs(count)
+        self.fleet = {"sizing": "auto", **dict(plan or {}), "uavs": count}
 
     def _create_pois(self) -> None:
         for spec in self.scenario.pois:
             self.state.pois.add(PoI(spec.id, spec.position_m, spec.priority, spec.survey_time_s, spec.altitude_m))
-        cfg, area = self.scenario.random_pois, self.scenario.area
-        for i in range(1, cfg.count + 1):
-            x = self.rng.uniform(area.x_min_m + cfg.margin_m, area.x_max_m - cfg.margin_m)
-            y = self.rng.uniform(area.y_min_m + cfg.margin_m, area.y_max_m - cfg.margin_m)
+        cfg = self.scenario.random_pois
+        low, high = cfg.count
+        # Only draw the count when it is a range, so a fixed count consumes exactly
+        # the random numbers it always did and existing seeds reproduce unchanged.
+        count = low if low == high else int(self.rng.integers(low, high + 1))
+        for i in range(1, count + 1):
+            x, y = self._sample_poi_xy(self.rng)
             priority = int(self.rng.integers(cfg.priority[0], cfg.priority[1] + 1))
             survey = float(self.rng.uniform(*cfg.survey_time_s))
             self.state.pois.add(PoI(f"POI-R{i}", (x, y), priority, round(survey, 1)))
+
+    def _sample_poi_xy(self, rng: np.random.Generator) -> tuple[float, float]:
+        """A spot in the random_pois region, min_spacing_m from every PoI and clear of obstacles.
+
+        Rejection sampling. When the region is too crowded for the spacing, the
+        most spread-out candidate wins rather than failing the whole run; only a
+        region with no free ground at all (every candidate blocked) is an error.
+        """
+        cfg = self.scenario.random_pois
+        x0, y0, x1, y1 = cfg.bounds(self.state.area)
+        placed = [(float(p.position[0]), float(p.position[1])) for p in self.state.pois]
+        best, best_gap = None, -1.0
+        for _ in range(_PLACEMENT_TRIES):
+            x, y = float(rng.uniform(x0, x1)), float(rng.uniform(y0, y1))
+            if not all(ok(x, y) for ok in self._placement_filters):
+                continue
+            gap = min((math.hypot(x - px, y - py) for px, py in placed), default=math.inf)
+            if gap >= cfg.min_spacing_m:
+                return x, y
+            if gap > best_gap:
+                best, best_gap = (x, y), gap
+        if best is None:
+            raise CommandError("no free position left for a PoI in the random_pois region")
+        return best
 
     # -------------------------------------------------------------- lifecycle
     def start(self) -> None:
         """Publish the initial events. Subscribe to ``world.events`` before calling this."""
         if self._started:
             return
+        if not self.state.uavs:
+            raise RuntimeError("uavs.count is 'auto' but no fleet was spawned - "
+                               "run it through simulation.runner.Simulation, which sizes the fleet")
         self._started = True
         st = self.state
         self.publish(EventType.SIM_STARTED,
                      f"Scenario '{self.scenario.name}' started: {len(st.uavs)} UAVs, "
                      f"{len(st.pois)} PoIs, seed {self.seed}, duration {self.duration_s:.0f}s",
-                     data={"scenario": self.scenario.name, "seed": self.seed})
+                     data={"scenario": self.scenario.name, "seed": self.seed, "fleet": dict(self.fleet),
+                           "timeline": [{"at_s": t.at_s, "action": t.action} for t in
+                                        sorted(self.timeline, key=lambda t: t.at_s)]})
+        if self.fleet["sizing"] == "auto":
+            f = self.fleet
+            capped = f" (capped at max_count {f['uavs']}, {f['required']} needed)" if f["capped"] else ""
+            self.publish(EventType.FLEET_PLANNED,
+                         f"Fleet sized to the mission ({f['pois']} PoIs): {f['uavs']} UAVs = {f['surveyors']} survey + "
+                         f"{f['relays']} relay + {f['spares']} spare + {f['fault_reserve']} fault reserve{capped}",
+                         severity=Severity.WARNING if f["capped"] else Severity.INFO, data=dict(f))
         for uav in st.uavs.values():
             x, y, z = uav.position
             self.publish(EventType.UAV_SPAWNED, f"{uav.name} spawned at ({x:.1f}, {y:.1f}, {z:.1f})",
@@ -268,6 +353,16 @@ class World:
         self.publish(EventType.UAV_COMMANDED, f"{uav.name} altitude -> {altitude_m:.0f} m"
                      + (f" [{reason}]" if reason else ""),
                      uav_id=uav_id, data={"target_m": uav.target.round(2).tolist(), "reason": reason})
+
+    def set_brake(self, uav_id: int, on: bool, reason: str = "") -> None:
+        """Collision avoidance: stop moving horizontally (``on``) or carry on to the waypoint."""
+        uav = self._operational_uav(uav_id)
+        if uav.braking == on:
+            return
+        uav.braking = on
+        if on:
+            self.publish(EventType.UAV_COMMANDED, f"{uav.name} holding position" + (f" [{reason}]" if reason else ""),
+                         uav_id=uav_id, data={"brake": True, "reason": reason})
 
     def hold(self, uav_id: int, reason: str = "") -> None:
         uav = self._taskable_uav(uav_id)
@@ -400,6 +495,21 @@ class World:
     def register_point_selector(self, name: str, selector: PointSelector) -> None:
         """Named positions usable in triggers, e.g. ``center_m: backbone_midpoint``."""
         self._point_selectors[name] = selector
+
+    def register_placement_filter(self, allowed: PlacementFilter) -> None:
+        """A check ``(x, y) -> bool`` every randomly placed PoI must pass, e.g. not inside an obstacle."""
+        self._placement_filters.append(allowed)
+
+    def resolve_poi(self, value: Any) -> str:
+        """A PoI id, or ``random_active``: a PoI not yet completed, preferring one under survey."""
+        if value != RANDOM_ACTIVE_POI:
+            return str(value)
+        active = self._active_pois()
+        for status in (PoIStatus.IN_PROGRESS, PoIStatus.ASSIGNED, PoIStatus.PENDING):
+            group = sorted((p for p in active if p.status is status), key=lambda p: p.poi_id)
+            if group:
+                return group[int(self._choice_rng.integers(len(group)))].poi_id
+        raise CommandError(f"selector '{RANDOM_ACTIVE_POI}' matched no PoI (all completed)")
 
     def resolve_point(self, value: Any) -> np.ndarray:
         """A position from [x, y(, z)] or a registered selector name."""
@@ -569,6 +679,24 @@ class World:
         for trig in self._triggers.pop_due(self.t):
             self._dispatch(trig)
 
+    def _active_pois(self) -> list[PoI]:
+        return [p for p in self.state.pois if not p.is_completed]
+
+    def _missing_target(self, trig: Trigger) -> Optional[str]:
+        """Why this trigger's selectors match nothing right now, or None if they all resolve."""
+        params = trig.params
+        try:
+            uav = params.get("uav_id")
+            if isinstance(uav, str) and not uav.strip().isdigit():
+                self.resolve_uav(uav)
+            if isinstance(params.get("center_m"), str):
+                self.resolve_point(params["center_m"])
+            if params.get("poi_id") == RANDOM_ACTIVE_POI and not self._active_pois():
+                raise CommandError(f"selector '{RANDOM_ACTIVE_POI}' matched no PoI")
+        except CommandError as exc:
+            return str(exc)
+        return None
+
     def _dispatch(self, trig: Trigger) -> None:
         action = trig.action.value
         handler = self._trigger_handlers.get(trig.action)
@@ -576,8 +704,18 @@ class World:
             self.publish(EventType.TRIGGER_REJECTED, f"No handler registered for '{action}' - ignored",
                          severity=Severity.WARNING, data={"action": action, "params": dict(trig.params)})
             return
-        self.publish(EventType.TRIGGER_FIRED, f"Scenario trigger '{action}' {dict(trig.params)}",
-                     data={"action": action, "params": dict(trig.params)})
+        retry_until = self._retry_until.get(trig.index)
+        if (retry_until is not None and self.t + _RETRY_S <= retry_until + 1e-9
+                and self._missing_target(trig) is not None):
+            self._triggers.defer(trig, self.t + _RETRY_S)
+            return
+        data: dict[str, Any] = {"action": action, "params": dict(trig.params)}
+        note = ""
+        planned = self._planned_s.get(trig.index)
+        if planned is not None and self.t - planned > 1e-6:
+            data["planned_s"] = planned
+            note = f" (planned for {planned:.1f}s, waited {self.t - planned:.1f}s for a target)"
+        self.publish(EventType.TRIGGER_FIRED, f"Scenario trigger '{action}' {dict(trig.params)}{note}", data=data)
         try:
             handler(trig)
         except CommandError as exc:
@@ -601,7 +739,8 @@ class World:
         return self.resolve_uav(trig.params["uav_id"])
 
     def _on_complete_poi(self, trig: Trigger) -> None:
-        self.complete_poi(self._param(trig, "poi_id", str), early=True, reason="scenario trigger")
+        poi_id = self.resolve_poi(self._param(trig, "poi_id", str))
+        self.complete_poi(poi_id, early=True, reason="scenario trigger")
 
     def _on_fail_uav(self, trig: Trigger) -> None:
         self.fail_uav(self._trigger_uav(trig), self._param(trig, "reason", str, "scenario trigger"))
@@ -611,8 +750,10 @@ class World:
 
     def _on_add_poi(self, trig: Trigger) -> None:
         pos = trig.params.get("position_m")
+        if pos == RANDOM_POSITION:
+            pos = self._sample_poi_xy(self._choice_rng)
         if not isinstance(pos, (list, tuple)):
-            raise CommandError("parameter 'position_m' must be [x, y]")
+            raise CommandError(f"parameter 'position_m' must be [x, y] or '{RANDOM_POSITION}'")
         altitude = trig.params.get("altitude_m")
         self.add_poi(self._param(trig, "id", str), pos, self._param(trig, "priority", int, 5),
                      self._param(trig, "survey_time_s", float, 60.0),

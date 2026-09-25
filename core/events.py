@@ -16,9 +16,10 @@ Two kinds of events flow through the platform:
 
 from __future__ import annotations
 
+import bisect
 import logging
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Optional
 
@@ -38,6 +39,7 @@ class EventType(str, Enum):
     # simulation lifecycle
     SIM_STARTED = "SIM_STARTED"
     SIM_STOPPED = "SIM_STOPPED"
+    FLEET_PLANNED = "FLEET_PLANNED"          # uavs.count: auto - how many UAVs and why
     # UAV
     UAV_SPAWNED = "UAV_SPAWNED"
     UAV_COMMANDED = "UAV_COMMANDED"
@@ -220,6 +222,12 @@ class TriggerSchedule:
             due.append(self._queue[self._next])
             self._next += 1
         return due
+
+    def defer(self, trigger: Trigger, at_s: float) -> None:
+        """Put a trigger back to fire again at ``at_s`` (its target did not exist yet)."""
+        pending = self._queue[self._next:]
+        bisect.insort(pending, replace(trigger, at_s=at_s), key=lambda tr: (tr.at_s, tr.index))
+        self._queue[self._next:] = pending
 
     @property
     def remaining(self) -> int:

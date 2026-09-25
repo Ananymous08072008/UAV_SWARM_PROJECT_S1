@@ -27,14 +27,14 @@ uav:
   max_accel_mps2: 3.0
   climb_rate_mps: 3.0
   arrival_radius_m: 2.0
-  default_altitude_m: 35.0   # survey altitude if a PoI does not specify one
-  rth_altitude_m: 45.0       # return-to-home transit altitude
-  max_altitude_m: 120.0      # regulatory ceiling
+  default_altitude_m: 40.0   # survey altitude if a PoI does not specify one
+  rth_altitude_m: 80.0       # return-to-home transit altitude (above outbound survey/relay traffic)
+  max_altitude_m: 100.0      # maximum operational height
   heading_min_speed_mps: 0.5
 
 battery:
-  hover_drain_pct_per_min: 4.0    # ~18 min endurance hovering
-  cruise_drain_pct_per_min: 1.5   # EXTRA drain at cruise speed
+  hover_drain_pct_per_min: 5.0    # 100 % / 5 %/min = 1200 s: the longest a UAV can stay airborne
+  cruise_drain_pct_per_min: 1.5   # EXTRA drain at cruise speed (~15 min flying at 10 m/s)
   low_pct: 30.0
   critical_pct: 15.0
   charge_rate_pct_per_min: 25.0   # battery swap / fast charge on the home pad
@@ -42,12 +42,14 @@ battery:
 
 # --- swarm research network (simulation/communication.py) -------------
 # Log-distance path loss + logistic PDR curve. With these values a healthy
-# UAV-UAV link reaches ~193 m at 85 % PDR (~240 m at 50 %), and a UAV-GCS
-# link ~328 m at 85 % thanks to the bigger ground antenna.
+# UAV-UAV link has its maximum range at 100 m (85 % PDR, the quality relays
+# are planned for) and degrades beyond it: ~73 % at 110 m, ~59 % at 120 m,
+# dropping out around 130 m. A UAV-GCS link reaches ~328 m at 85 % thanks to
+# the high-gain ground antenna.
 communication:
-  tx_power_dbm: 20.0
+  tx_power_dbm: 12.6
   uav_antenna_gain_dbi: 0.0
-  gcs_antenna_gain_dbi: 6.0
+  gcs_antenna_gain_dbi: 13.4
   gcs_antenna_height_m: 10.0
   path_loss_ref_db: 40.0
   path_loss_exponent: 2.6
@@ -77,6 +79,15 @@ swarm:
   backup_min_battery_pct: 60.0
   data_ferry: true            # disconnected UAVs carry data back themselves
 
+  # Fleet sizing for scenarios with `uavs: {count: auto}` (swarm/fleet_planner.py):
+  # the fewest surveyors that finish every PoI in time (one after another by priority)
+  # + relays to keep the first wave connected + the terms below.
+  fleet:
+    spares: 1                 # standby UAVs: parked backup / relay handover replacement
+    fault_reserve: true       # +1 per scheduled UAV loss and per new PoI of unknown position
+    time_budget_fraction: 0.75  # the PoI schedule may fill 75 % of the mission time
+    relay_chain: true           # false = no relays, surveyors carry data home (smallest fleet)
+
   routing:
     hysteresis: 0.15          # keep the current next hop while within 15 % of the best
     min_link_pdr: 0.7         # weaker links are used only when nothing else reaches the GCS
@@ -88,7 +99,7 @@ swarm:
     ferry_wait_s: 240.0       # after this wait, survey even without a relay chain (store-and-forward)
 
   relay:
-    relay_altitude_m: 55.0
+    relay_altitude_m: 60.0
     min_planned_pdr: 0.85     # planned quality of every hop
     spacing_safety: 0.9
     reposition_threshold_m: 25.0
@@ -112,10 +123,11 @@ swarm:
     preempt_priority_gap: 2
 
   safety:
-    min_separation_m: 5.0
-    altitude_floor_m: 40.0    # every UAV owns a flight level: 40 m + (id - 1) * 6 m
-    altitude_layers: 12       # >= fleet size, so no two UAVs share a level
-    layer_spacing_m: 6.0
+    min_separation_m: 20.0    # two airborne UAVs closer than this collide (both are lost)
+    altitude_floor_m: 20.0    # flight levels 20, 40, 60, 80, 100 m (up to uav.max_altitude_m)
+    layer_spacing_m: 20.0     # >= min_separation_m, so UAVs on different levels never collide
+    alert_distance_m: 30.0    # predicted to pass closer than this horizontally -> separate vertically
+    conflict_horizon_s: 12.0  # how far ahead collisions are predicted
     obstacle_clearance_m: 10.0
     recall_at_deadline: true
     recall_margin_s: 30.0

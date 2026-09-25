@@ -27,7 +27,11 @@ def test_uav_returns_home_when_the_reserve_is_reached():
     run_until(sim, 60)
     uav = next(u for u in sim.world.state.uavs.values() if u.is_airborne and u.role is UAVRole.SURVEY)
     needed = sim.manager.energy.needed_pct(uav)
-    sim.world.set_battery(uav.uav_id, needed + 1.0, "test")
+    poi = sim.world.state.pois.get(uav.assigned_poi)
+    # Enough to finish the survey too, so only the reserve can send it home.
+    finish = (sim.env.battery.task_cost_pct(uav, uav.target, poi.survey_time_s - poi.progress_s)
+              + sim.manager.energy.params.reserve_pct * 0.5)
+    sim.world.set_battery(uav.uav_id, max(needed, finish) + 1.0, "test")
     run_until(sim, 70)
     assert uav.role is UAVRole.SURVEY, "above the reserve it keeps working"
     sim.world.set_battery(uav.uav_id, needed - 0.5, "test")

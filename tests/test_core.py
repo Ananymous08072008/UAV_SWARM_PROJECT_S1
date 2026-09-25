@@ -78,7 +78,36 @@ def test_uav_selectors_and_injection():
 
 def test_real_config_files_load():
     world = World.from_files("config/parameters.yaml", "config/scenario.yaml")
-    assert len(world.state.uavs) == 12 and len(world.state.pois) == 6
+    low, high = world.scenario.random_pois.count
+    assert low <= len(world.state.pois) <= high
+    # count: auto - the World waits for the fleet planner rather than guessing.
+    assert world.scenario.uavs.auto and not world.state.uavs
+
+
+def test_an_auto_fleet_world_refuses_to_start_unsized():
+    world = make_world(uavs={"count": "auto", "start_m": [0, 0]})
+    with pytest.raises(RuntimeError, match="no fleet was spawned"):
+        world.start()
+    world.spawn_fleet(4, {"pois": 2, "surveyors": 2, "relays": 1, "spares": 1, "fault_reserve": 0,
+                          "required": 4, "capped": False})
+    world.start()
+    assert len(world.state.uavs) == 4
+    assert world.events.count(EventType.FLEET_PLANNED) == 1
+    with pytest.raises(CommandError, match="already been spawned"):
+        world.spawn_fleet(4)
+
+
+def test_spawn_fleet_is_only_for_auto_scenarios_and_respects_the_cap():
+    with pytest.raises(CommandError, match="fixes the UAV count"):
+        make_world().spawn_fleet(2)
+    with pytest.raises(CommandError, match="outside"):
+        make_world(uavs={"count": "auto", "max_count": 5}).spawn_fleet(6)
+
+
+@pytest.mark.parametrize("count", ["lots", 0, True])
+def test_uav_count_must_be_a_number_or_auto(count):
+    with pytest.raises(ConfigError, match="count"):
+        make_world(uavs={"count": count})
 
 
 # ------------------------------------------------------------------------ UAV

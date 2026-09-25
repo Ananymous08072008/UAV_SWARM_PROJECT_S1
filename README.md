@@ -32,8 +32,12 @@ python main.py                     # headless full-demo scenario, prints events 
 python main.py --demo              # dashboard + MAVLink + real time (what to record for the video)
 python main.py --dashboard --realtime --speed 4
 python main.py --scenario scenarios/network_degradation.yaml --mode baseline
-python -m pytest -q                # 164 tests
+python -m pytest -q                # 200 tests
 ```
+
+The default demo is different every run: it draws a new seed, 4-8 PoIs at random places, and a
+random time for each fault within its window. The seed is printed first; `--seed N` replays that
+run exactly. The scenarios in `scenarios/` keep fixed seeds for controlled comparisons.
 
 Useful flags: `--mode adaptive|baseline`, `--duration`, `--seed`, `--quiet`, `--all-events`,
 `--no-results`, `--keep-running`, `--port`, `--mavlink-target host:port`.
@@ -46,14 +50,15 @@ through the firewall once — the server then prints the LAN link to share:
 ### Mission studio (multi-user web app)
 
 `python -m dashboard.server` serves <http://127.0.0.1:8000> and starts no simulation of its own -
-every visitor builds and runs their own. Choose the UAV count, click the map to place Points of
-Interest and set their priorities, pick adaptive or baseline, then launch. Pause, resume, restart
+every visitor builds and runs their own. Click the map to place Points of Interest and set their
+priorities, pick adaptive or baseline, then launch - the fleet is sized to the mission (one UAV per
+PoI, the relays that keep them connected, a spare and a fault reserve) unless you fix the count. Pause, resume, restart
 and change speed while it runs; live charts plot connectivity, route PDR, latency and imagery
 delivery over time, so a relay failure and the recovery are visible as they happen. Sessions are
 independent worlds in their own threads, and the URL (`/?session=<id>`) can be shared so several
-people watch or drive the same mission. **Download data** saves the finished run - summary,
-timeseries, events and the mission that produced them - as a zip, which for a studio session is the
-only copy, since sessions keep nothing on disk. Full guide: [docs/running.md](docs/running.md).
+people watch or drive the same mission. **Download data (Excel)** saves the run's mission metrics
+and event log as an `.xlsx` workbook, which for a studio session is the only copy, since sessions
+keep nothing on disk. Full guide: [docs/running.md](docs/running.md).
 
 ### Deploy
 
@@ -71,8 +76,8 @@ Hugging Face Spaces, Railway, Fly.io. Deployed studios have no authentication; s
 `--dashboard` serves <http://127.0.0.1:8000>: live map (UAVs, PoIs, relay links, obstacles),
 UAV table, communication graph, event log, metrics, and operator buttons that inject faults into
 the running simulation (degrade a relay's radio, drop debris on the backbone, add an urgent PoI,
-drain a battery, fail a UAV). **Download data** in the header saves the same archive the studio
-offers, which is the way to keep a run started with `--no-results`. One shared simulation, driven
+drain a battery, fail a UAV). **Download data (Excel)** in the header saves the same workbook the
+studio offers, which is the way to keep a run started with `--no-results`. One shared simulation, driven
 from the command line - use the mission studio when people need their own.
 
 ### Mission Planner
@@ -119,7 +124,7 @@ dashboard/              mission studio (sessions, builder, charts, run download)
 swarm_logging/          event log files, metrics, SQLite database
 scenarios/              one file per demonstration scenario
 experiments/            batch runs and figures
-tests/                  164 tests across all layers
+tests/                  200 tests across all layers
 docs/                   architecture, Mission Planner guide, proposal outline, demo script
 ```
 

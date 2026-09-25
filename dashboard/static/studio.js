@@ -49,7 +49,7 @@
     $("poi-count").textContent = pois.length + " placed";
     if (!pois.length) {
       host.innerHTML = '<p class="note">No PoIs yet. Click the map to place one, ' +
-                       'or launch with the standard six.</p>';
+                       'or launch now for a random set.</p>';
       return;
     }
     host.innerHTML = pois.map(function (p, i) {
@@ -104,7 +104,7 @@
   function launch() {
     var spec = {
       name: "mission",
-      uav_count: parseInt($("uav-count").value, 10),
+      uav_count: $("uav-auto").checked ? "auto" : parseInt($("uav-count").value, 10),
       duration_s: parseFloat($("duration").value),
       speed: parseFloat($("speed").value),
       seed: parseInt($("seed").value, 10),
@@ -236,6 +236,7 @@
     $("h-mode").textContent = status.mode;
     $("h-scenario").textContent = status.scenario;
     $("h-time").textContent = fmt(status.t_s, 0) + " / " + fmt(status.duration_s, 0) + " s";
+    renderFleet(status);
     $("btn-pause").textContent = status.state === "paused" ? "Resume" : "Pause";
     $("btn-pause").disabled = (status.state === "finished" || status.state === "error");
     // The run is over and the session will be reaped when idle, so draw attention
@@ -246,6 +247,16 @@
       $("live-speed-value").textContent = Math.round(status.speed) + "x";
     }
     if (status.error) $("builder-note").textContent = status.error;
+  }
+
+  function renderFleet(status) {
+    var f = status.fleet || {};
+    var auto = f.sizing === "auto";
+    $("h-uavs").textContent = status.uav_count + (auto ? " (auto)" : "");
+    $("h-uavs").title = auto
+      ? f.surveyors + " survey + " + f.relays + " relay + " + f.spares + " spare + " +
+        f.fault_reserve + " fault reserve" + (f.capped ? " - capped, " + f.required + " needed" : "")
+      : "fixed fleet size";
   }
 
   function control(action, extra) {
@@ -264,8 +275,8 @@
     });
   }
 
-  /* Take the run away as a file: summary, timeseries, events and the mission
-     spec. Studio sessions write nothing to disk and are reaped once idle, so
+  /* Take the run away as an Excel workbook: the mission metrics and the event
+     log. Studio sessions write nothing to disk and are reaped once idle, so
      this is the only way the data outlives the tab.
 
      A hidden link rather than fetch(): the response is a normal GET with an
@@ -437,6 +448,9 @@
         var suffix = id === "duration" ? " s" : (id === "speed" ? "x" : "");
         $(id + "-value").textContent = el.value + suffix;
       });
+    });
+    $("uav-auto").addEventListener("change", function () {
+      $("uav-count-field").hidden = $("uav-auto").checked;
     });
     $("clear-pois").addEventListener("click", function () { builder.clear(); });
     $("launch").addEventListener("click", launch);

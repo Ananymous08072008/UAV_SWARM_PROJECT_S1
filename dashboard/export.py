@@ -1,39 +1,39 @@
 """
 dashboard/export.py
-Packs one simulation run into a single downloadable archive.
+Packs one simulation run into a single Excel workbook for download.
 
-``main.py`` writes a directory per run under ``results/``. The mission studio
-deliberately does not - a shared server would litter the disk with a directory
-per visitor, and a hosted one loses the disk anyway - so the same files are built
-in memory here and handed to the browser as one zip.
+The mission studio writes nothing to disk - a shared server would litter it with
+a directory per visitor, and a hosted one loses the disk anyway - so the
+workbook is built in memory and handed to the browser.
 
-The names and columns match a ``results/<run>/`` directory exactly, so whatever
-reads one reads the other: experiments/plot_results.py, a spreadsheet, pandas.
-
-    <run>/summary.json      the grouped metrics used in the report
-    <run>/timeseries.csv    one row per metric sample
-    <run>/events.csv        every event, spreadsheet friendly
-    <run>/events.jsonl      every event, full detail
-    <run>/scenario.json     what was run, enough to run it again
-    <run>/manifest.json     export provenance, including any truncation
+    Mission metrics    the grouped summary used in the report, plus run details
+    Metrics over time  one row per metric sample
+    Event log          every event of the run
 """
 
 from __future__ import annotations
 
-import csv
 import io
 import json
 import re
-import zipfile
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
-from swarm_logging.event_logger import CSV_COLUMNS
+from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+EVENT_COLUMNS = (("Seq", 8), ("Time (s)", 10), ("Type", 22), ("Severity", 10), ("UAV", 6),
+                 ("PoI", 12), ("Message", 80), ("Details", 60))
 
 # Anything outside this is stripped from the download name. Scenario names reach
 # us from YAML and from the browser, and the name goes into a Content-Disposition
 # header - an unescaped quote or newline there is a header injection.
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+_BOLD = Font(bold=True)
 
 
 def safe_name(text: str, fallback: str = "run") -> str:
@@ -41,30 +41,38 @@ def safe_name(text: str, fallback: str = "run") -> str:
     return cleaned[:60] or fallback
 
 
-def _csv_bytes(rows: list[Mapping[str, Any]], columns: tuple[str, ...]) -> bytes:
-    buf = io.StringIO(newline="")
-    writer = csv.DictWriter(buf, fieldnames=list(columns), extrasaction="ignore")
-    writer.writeheader()
-    writer.writerows(rows)
-    return buf.getvalue().encode("utf-8")
+def _label(key: str) -> str:
+    return key.replace("_", " ").capitalize()
 
 
-def _events_csv(records: list[Mapping[str, Any]]) -> bytes:
-    buf = io.StringIO(newline="")
-    writer = csv.writer(buf)
-    writer.writerow(CSV_COLUMNS)
-    for r in records:
-        writer.writerow([r["seq"], r["t_s"], r["type"], r["severity"], r["uav_id"],
-                         r["poi_id"], r["message"], json.dumps(r.get("data", {}), sort_keys=True)])
-    return buf.getvalue().encode("utf-8")
+def _cell(ws, value: Any, bold: bool = False) -> WriteOnlyCell:
+    if isinstance(value, (Mapping, list, tuple)):
+        value = json.dumps(value, sort_keys=True, default=str)
+    elif value is not None and not isinstance(value, (bool, int, float)):
+        value = str(value)
+    cell = WriteOnlyCell(ws, value=value)
+    if isinstance(value, str):
+        # Event messages and PoI names can come from the browser. A string that
+        # starts with "=" would otherwise be stored as a live formula.
+        cell.data_type = "s"
+    if bold:
+        cell.font = _BOLD
+    return cell
 
 
-def _json_bytes(payload: Any) -> bytes:
-    return json.dumps(payload, indent=2, default=str).encode("utf-8")
+def _row(ws, values, bold: bool = False) -> None:
+    ws.append([_cell(ws, v, bold) for v in values])
+
+
+def _sheet(wb: Workbook, title: str, widths: list[float]):
+    ws = wb.create_sheet(title)
+    for i, width in enumerate(widths):
+        ws.column_dimensions[get_column_letter(i + 1)].width = width
+    return ws
 
 
 def run_stem(sim, session_id: Optional[str] = None) -> str:
-    """The archive's base name, built like a results/ run directory."""
+    """The workbook's base name: time, scenario, mode (and session)."""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     parts = [stamp, safe_name(sim.world.scenario.name, "scenario"), safe_name(sim.mode, "mode")]
     if session_id:
@@ -72,11 +80,10 @@ def run_stem(sim, session_id: Optional[str] = None) -> str:
     return "_".join(parts)
 
 
-def build_archive(sim, session_id: Optional[str] = None,
-                  spec: Optional[Mapping[str, Any]] = None,
-                  extra: Optional[Mapping[str, Any]] = None) -> tuple[str, bytes]:
+def build_workbook(sim, session_id: Optional[str] = None,
+                   extra: Optional[Mapping[str, Any]] = None) -> tuple[str, bytes]:
     """
-    Build the zip for ``sim`` and return ``(filename, bytes)``.
+    Build the workbook for ``sim`` and return ``(filename, bytes)``.
 
     Safe to call on a run that is still going: every list is snapshotted first,
     because the simulation thread owns them and keeps appending.
@@ -85,8 +92,8 @@ def build_archive(sim, session_id: Optional[str] = None,
     rows = list(sim.metrics.rows())
 
     # A finished run already computed its summary; a running one is aggregated now.
-    # A crashed run still has logs worth downloading, so a summary that cannot be
-    # produced must not take the archive down with it.
+    # A crashed run still has an event log worth downloading, so a summary that
+    # cannot be produced must not take the download down with it.
     summary, summary_error = sim.summary, None
     if summary is None:
         try:
@@ -97,50 +104,48 @@ def build_archive(sim, session_id: Optional[str] = None,
     logger = getattr(sim, "logger", None)
     if logger is not None:
         records = list(logger.records)
-        dropped, source = logger.dropped, "event log"
+        log_note = (f"incomplete - the oldest {logger.dropped} events were dropped"
+                    if logger.dropped else "complete")
     else:
-        # No recorder attached: the bus keeps only its last 2000 events, so say so
-        # rather than presenting the tail as the whole run.
+        # No recorder attached: the bus keeps only its most recent events, so say
+        # so rather than presenting the tail as the whole run.
         records = [e.to_dict() for e in sim.world.events.history()]
-        dropped, source = 0, "event bus (bounded ring buffer - may be incomplete)"
+        log_note = "may be incomplete - only the most recent events were kept"
 
-    world = sim.world
-    scenario = {"scenario": world.scenario.name, "mode": sim.mode, "seed": world.seed,
-                "duration_s": world.duration_s}
-    if spec is not None:
-        # What the browser asked for: UAV count, PoI placement, speed. Without it a
-        # studio run cannot be reproduced, since it came from clicks, not a file.
-        scenario["mission_spec"] = dict(spec)
+    wb = Workbook(write_only=True)
 
-    manifest = {
-        "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "session_id": session_id,
-        "scenario": world.scenario.name,
-        "mode": sim.mode,
-        "seed": world.seed,
-        "sim_time_s": round(world.t, 2),
-        "run_finished": sim.summary is not None,
-        "samples": len(rows),
-        "events": len(records),
-        "events_source": source,
-        "events_dropped": dropped,
-        "complete": dropped == 0 and source == "event log",
-        "files": ["summary.json", "timeseries.csv", "events.csv", "events.jsonl",
-                  "scenario.json", "manifest.json"],
-    }
+    ws = _sheet(wb, "Mission metrics", [16, 30, 24])
+    ws.freeze_panes = "A2"
+    _row(ws, ("Category", "Metric", "Value"), bold=True)
+    details = {"exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+               "run_finished": sim.summary is not None, "sim_time_s": round(sim.world.t, 2),
+               "event_log": log_note}
+    if session_id:
+        details["session_id"] = session_id
+    details.update(extra or {})
     if summary_error is not None:
-        manifest["summary_error"] = summary_error
-    if extra:
-        manifest.update(extra)
+        details["summary_error"] = summary_error
+    for key, value in details.items():
+        _row(ws, ("Export", _label(key), value))
+    for group, values in summary.items():
+        for key, value in values.items():
+            _row(ws, (_label(group), _label(key), value))
+
+    columns = list(rows[0]) if rows else []
+    ws = _sheet(wb, "Metrics over time", [14] * len(columns))
+    ws.freeze_panes = "A2"
+    _row(ws, columns, bold=True)
+    for sample in rows:
+        _row(ws, [sample.get(c) for c in columns])
+
+    ws = _sheet(wb, "Event log", [w for _, w in EVENT_COLUMNS])
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:H{len(records) + 1}"
+    _row(ws, [name for name, _ in EVENT_COLUMNS], bold=True)
+    for r in records:
+        _row(ws, (r["seq"], r["t_s"], r["type"], r["severity"], r["uav_id"], r["poi_id"],
+                  r["message"], r.get("data") or None))
 
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{stem}/summary.json", _json_bytes(summary))
-        if rows:
-            zf.writestr(f"{stem}/timeseries.csv", _csv_bytes(rows, tuple(rows[0])))
-        zf.writestr(f"{stem}/events.csv", _events_csv(records))
-        zf.writestr(f"{stem}/events.jsonl",
-                    "".join(json.dumps(r) + "\n" for r in records).encode("utf-8"))
-        zf.writestr(f"{stem}/scenario.json", _json_bytes(scenario))
-        zf.writestr(f"{stem}/manifest.json", _json_bytes(manifest))
-    return f"{stem}.zip", buf.getvalue()
+    wb.save(buf)
+    return f"{stem}.xlsx", buf.getvalue()

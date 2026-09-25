@@ -135,6 +135,9 @@ class MetricsCollector:
                 "seed": world.seed,
                 "duration_s": round(world.t, 1),
                 "uavs": len(world.state.uavs),
+                "fleet_sizing": world.fleet["sizing"],
+                **{f"fleet_{k}": world.fleet[k] for k in ("surveyors", "relays", "spares", "fault_reserve")
+                   if k in world.fleet},
             },
             "mission": {
                 "pois_total": len(pois),
@@ -186,6 +189,8 @@ class MetricsCollector:
                 "min_separation_m": round(safety.min_separation_observed_m, 2)
                 if safety.min_separation_observed_m != float("inf") else None,
                 "separation_violations": safety.violations.get("separation", 0),
+                "collisions": safety.collisions,
+                "avoidance_manoeuvres": safety.deconflictions,
                 "geofence_violations": safety.violations.get("geofence", 0),
                 "obstacle_violations": safety.violations.get("obstacle", 0),
                 "uavs_lost": len(world.state.uavs) - len(operational),

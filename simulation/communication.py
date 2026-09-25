@@ -31,9 +31,9 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class CommParams:
-    tx_power_dbm: float = 20.0
+    tx_power_dbm: float = 12.6           # UAV-UAV: 85 % PDR at 100 m, degrading beyond
     uav_antenna_gain_dbi: float = 0.0
-    gcs_antenna_gain_dbi: float = 6.0
+    gcs_antenna_gain_dbi: float = 13.4   # UAV-GCS: 85 % PDR at ~328 m
     gcs_antenna_height_m: float = 10.0
     path_loss_ref_db: float = 40.0
     path_loss_exponent: float = 2.6

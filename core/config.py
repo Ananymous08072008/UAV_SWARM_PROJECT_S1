@@ -11,6 +11,7 @@ cycles. Sections that later stages add (e.g. ``communication``) are kept in
 from __future__ import annotations
 
 import math
+import secrets
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -19,6 +20,13 @@ import yaml
 
 EARTH_RADIUS_M = 6_378_137.0  # WGS-84 equatorial radius
 MAX_UAVS = 250                # MAVLink system IDs 1..250 (255 is the GCS)
+RANDOM_SEED = "random"        # scenario.seed value meaning "a fresh seed every run"
+AUTO_COUNT = "auto"           # uavs.count value meaning "size the fleet to the mission"
+
+
+def fresh_seed() -> int:
+    """A new run seed. Kept below 2**31 so it is short enough to type back in as --seed."""
+    return secrets.randbelow(2**31)
 
 
 class ConfigError(ValueError):
@@ -129,9 +137,9 @@ class UAVParams:
     max_accel_mps2: float = 3.0
     climb_rate_mps: float = 3.0
     arrival_radius_m: float = 2.0
-    default_altitude_m: float = 30.0
-    rth_altitude_m: float = 40.0
-    max_altitude_m: float = 120.0
+    default_altitude_m: float = 40.0
+    rth_altitude_m: float = 80.0
+    max_altitude_m: float = 100.0
     heading_min_speed_mps: float = 0.5
 
     def __post_init__(self) -> None:
@@ -145,8 +153,8 @@ class UAVParams:
 
 @dataclass(frozen=True)
 class BatteryParams:
-    hover_drain_pct_per_min: float = 1.2
-    cruise_drain_pct_per_min: float = 0.8
+    hover_drain_pct_per_min: float = 5.0   # 100 % lasts 1200 s: the maximum flight time
+    cruise_drain_pct_per_min: float = 1.5
     low_pct: float = 30.0
     critical_pct: float = 15.0
     charge_rate_pct_per_min: float = 25.0  # on the home pad (fast charge / battery swap)
@@ -202,13 +210,15 @@ class ScenarioMeta:
     name: str = "unnamed"
     description: str = ""
     duration_s: float = 300.0
-    seed: Optional[int] = None
+    seed: Optional[int | str] = None
 
     def __post_init__(self) -> None:
         _require(isinstance(self.name, str) and self.name != "", "name must be a non-empty string")
         _require(isinstance(self.description, str), "description must be a string")
         _require(self.duration_s > 0, "duration_s must be > 0")
-        _require(self.seed is None or isinstance(self.seed, int), "seed must be an integer or null")
+        _require(self.seed is None or self.seed == RANDOM_SEED
+                 or (isinstance(self.seed, int) and not isinstance(self.seed, bool)),
+                 f"seed must be an integer, null or '{RANDOM_SEED}'")
 
 
 @dataclass(frozen=True)
@@ -236,17 +246,25 @@ class GCSConfig:
 
 @dataclass(frozen=True)
 class SpawnConfig:
-    count: int = 6
+    """The launch pad. ``count: auto`` lets swarm/fleet_planner.py size the fleet
+    to the mission - the fewest surveyors that still finish every PoI in time,
+    one after another by priority - never above ``max_count``."""
+
+    count: int | str = 6
     formation: str = "grid"
     per_row: int = 3
     spacing_m: float = 8.0
     start_m: tuple[float, float] = (0.0, 0.0)
     initial_battery_pct: float = 100.0
     battery_overrides: Mapping[int, float] = field(default_factory=dict)
+    max_count: int = 40
 
     def __post_init__(self) -> None:
-        _require(isinstance(self.count, int) and 1 <= self.count <= MAX_UAVS,
-                 f"count must be an integer in 1..{MAX_UAVS}")
+        _require(self.count == AUTO_COUNT or (isinstance(self.count, int) and not isinstance(self.count, bool)
+                                              and 1 <= self.count <= MAX_UAVS),
+                 f"count must be an integer in 1..{MAX_UAVS} or '{AUTO_COUNT}'")
+        _require(isinstance(self.max_count, int) and 1 <= self.max_count <= MAX_UAVS,
+                 f"max_count must be an integer in 1..{MAX_UAVS}")
         _require(self.formation in ("grid", "line"), "formation must be 'grid' or 'line'")
         _require(isinstance(self.per_row, int) and self.per_row >= 1, "per_row must be an integer >= 1")
         _require(self.spacing_m > 0, "spacing_m must be > 0")
@@ -254,18 +272,28 @@ class SpawnConfig:
         object.__setattr__(self, "start_m", _float_tuple(self.start_m, 2, "start_m"))
         overrides = dict(self.battery_overrides or {})
         for uav_id, pct in overrides.items():
-            _require(isinstance(uav_id, int) and 1 <= uav_id <= self.count,
-                     f"battery_overrides key {uav_id!r} is not a UAV id in 1..{self.count}")
+            _require(isinstance(uav_id, int) and 1 <= uav_id <= self.upper_count,
+                     f"battery_overrides key {uav_id!r} is not a UAV id in 1..{self.upper_count}")
             _require(0 < float(pct) <= 100, f"battery_overrides[{uav_id}] must be in (0, 100]")
         object.__setattr__(self, "battery_overrides", {k: float(v) for k, v in overrides.items()})
 
-    def spawn_positions(self) -> list[tuple[float, float, float]]:
-        """Ground positions for UAV ids 1..count, in id order."""
-        per_row = self.count if self.formation == "line" else self.per_row
+    @property
+    def auto(self) -> bool:
+        return self.count == AUTO_COUNT
+
+    @property
+    def upper_count(self) -> int:
+        """The most UAVs this pad can launch: the fixed count, or max_count when sized automatically."""
+        return self.max_count if self.auto else self.count
+
+    def spawn_positions(self, count: Optional[int] = None) -> list[tuple[float, float, float]]:
+        """Ground positions for UAV ids 1..count (default: every slot on the pad), in id order."""
+        count = self.upper_count if count is None else count
+        per_row = count if self.formation == "line" else self.per_row
         x0, y0 = self.start_m
         return [
             (x0 + (i % per_row) * self.spacing_m, y0 + (i // per_row) * self.spacing_m, 0.0)
-            for i in range(self.count)
+            for i in range(count)
         ]
 
     def battery_for(self, uav_id: int) -> float:
@@ -290,13 +318,36 @@ class PoISpec:
 
 @dataclass(frozen=True)
 class RandomPoIConfig:
-    count: int = 0
+    """PoIs drawn from the run seed.
+
+    ``count`` is a number or ``[low, high]``; with a range the number of PoIs is
+    itself drawn per run. ``region_m`` ([x_min, y_min, x_max, y_max]) confines
+    them, e.g. to the disaster zone, instead of the whole operating area.
+    ``min_spacing_m`` keeps them apart; if the region is too crowded to honour it
+    the most spread-out candidate is used rather than failing the run.
+    """
+
+    count: int | tuple[int, int] = 0
     priority: tuple[int, int] = (1, 5)
     survey_time_s: tuple[float, float] = (30.0, 90.0)
     margin_m: float = 20.0
+    region_m: Optional[tuple[float, float, float, float]] = None
+    min_spacing_m: float = 0.0
 
     def __post_init__(self) -> None:
-        _require(isinstance(self.count, int) and self.count >= 0, "count must be an integer >= 0")
+        if isinstance(self.count, (list, tuple)):
+            c_lo, c_hi = _float_tuple(self.count, 2, "count")
+        else:
+            _require(isinstance(self.count, int), "count must be an integer or [low, high]")
+            c_lo = c_hi = float(self.count)
+        _require(c_lo.is_integer() and c_hi.is_integer() and 0 <= c_lo <= c_hi,
+                 "count must be an integer >= 0 or [low, high] integers with low <= high")
+        object.__setattr__(self, "count", (int(c_lo), int(c_hi)))
+        if self.region_m is not None:
+            x0, y0, x1, y1 = _float_tuple(self.region_m, 4, "region_m")
+            _require(x0 < x1 and y0 < y1, "region_m must be [x_min, y_min, x_max, y_max] with min < max")
+            object.__setattr__(self, "region_m", (x0, y0, x1, y1))
+        _require(self.min_spacing_m >= 0, "min_spacing_m must be >= 0")
         lo, hi = _float_tuple(self.priority, 2, "priority")
         _require(1 <= lo <= hi <= 5 and lo.is_integer() and hi.is_integer(),
                  "priority must be [low, high] integers within 1..5")
@@ -306,21 +357,65 @@ class RandomPoIConfig:
         object.__setattr__(self, "survey_time_s", (t_lo, t_hi))
         _require(self.margin_m >= 0, "margin_m must be >= 0")
 
+    @property
+    def max_count(self) -> int:
+        return self.count[1]
+
+    def bounds(self, area: "Area") -> tuple[float, float, float, float]:
+        """Where random PoIs may be placed: the region (or the area), kept margin_m off the area edge."""
+        x0, y0, x1, y1 = self.region_m or (area.x_min_m, area.y_min_m, area.x_max_m, area.y_max_m)
+        m = self.margin_m
+        return (max(x0, area.x_min_m + m), max(y0, area.y_min_m + m),
+                min(x1, area.x_max_m - m), min(y1, area.y_max_m - m))
+
 
 @dataclass(frozen=True)
 class TriggerSpec:
-    """A timed scenario input as written in YAML; validated by core.events."""
+    """A timed scenario input as written in YAML; validated by core.events.
+
+    ``at_s`` is a time or a window ``[earliest, latest]``. A window is resolved to
+    one time per run from the run seed (``resolve``), so the same seed replays
+    the same schedule and a new seed moves every windowed event. After loading,
+    ``at_s`` is always the earliest time and ``at_s_max`` the latest (or None).
+    """
 
     at_s: float
     action: str
     params: Mapping[str, Any] = field(default_factory=dict)
+    at_s_max: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.params is None:  # "params:" left empty in YAML
             object.__setattr__(self, "params", {})
-        _require(isinstance(self.at_s, (int, float)) and self.at_s >= 0, "at_s must be a number >= 0")
+        if isinstance(self.at_s, (list, tuple)):
+            _require(self.at_s_max is None, "give at_s as [earliest, latest] or use at_s_max, not both")
+            lo, hi = _float_tuple(self.at_s, 2, "at_s")
+            object.__setattr__(self, "at_s", lo)
+            object.__setattr__(self, "at_s_max", hi)
+        _require(isinstance(self.at_s, (int, float)) and not isinstance(self.at_s, bool) and self.at_s >= 0,
+                 "at_s must be a number >= 0 or [earliest, latest]")
+        _require(self.at_s_max is None or self.at_s_max >= self.at_s,
+                 "at_s window must be [earliest, latest] with earliest <= latest")
         _require(isinstance(self.action, str) and self.action != "", "action must be a non-empty string")
         _require(isinstance(self.params, Mapping), "params must be a mapping")
+
+    @property
+    def latest_s(self) -> float:
+        return self.at_s if self.at_s_max is None else self.at_s_max
+
+    def resolve(self, rng) -> "TriggerSpec":
+        """This trigger with one concrete time. Fixed times are returned untouched (no draw)."""
+        if self.at_s_max is None or self.at_s_max == self.at_s:
+            return self
+        return TriggerSpec(round(float(rng.uniform(self.at_s, self.at_s_max)), 1), self.action, self.params)
+
+    def clipped(self, duration_s: float) -> Optional["TriggerSpec"]:
+        """This trigger limited to a shorter run, or None if it can no longer fire in time."""
+        if self.at_s > duration_s:
+            return None
+        if self.at_s_max is None or self.at_s_max <= duration_s:
+            return self
+        return TriggerSpec(self.at_s, self.action, self.params, duration_s)
 
 
 @dataclass(frozen=True)
@@ -336,6 +431,10 @@ class ScenarioConfig:
     random_pois: RandomPoIConfig = field(default_factory=RandomPoIConfig)
     timeline: tuple[TriggerSpec, ...] = ()
     extra_sections: Mapping[str, Any] = field(default_factory=dict)
+    # True when the file said ``seed: random``. ``seed`` then already holds the
+    # seed drawn at load time; the flag tells long-lived callers (the mission
+    # studio caches this config) to draw their own for each new run.
+    random_seed: bool = False
 
     _KNOWN = ("scenario", "area", "gcs", "uavs", "pois", "random_pois", "timeline")
 
@@ -348,14 +447,17 @@ class ScenarioConfig:
             _require(poi.id not in seen, f"duplicate PoI id '{poi.id}'")
             seen.add(poi.id)
             _require(self.area.contains(*poi.position_m), f"PoI '{poi.id}' at {poi.position_m} is outside the area")
-        margin = self.random_pois.margin_m
-        _require(self.random_pois.count == 0
-                 or (2 * margin < self.area.x_max_m - self.area.x_min_m
-                     and 2 * margin < self.area.y_max_m - self.area.y_min_m),
-                 "random_pois.margin_m leaves no room inside the area")
+        rnd = self.random_pois
+        region = rnd.region_m
+        _require(region is None or (self.area.contains(region[0], region[1])
+                                    and self.area.contains(region[2], region[3])),
+                 f"random_pois.region_m {region} is not inside the area")
+        x0, y0, x1, y1 = rnd.bounds(self.area)
+        _require(rnd.max_count == 0 or (x0 < x1 and y0 < y1),
+                 "random_pois.margin_m leaves no room inside the area (or region_m)")
         for trig in self.timeline:
-            _require(trig.at_s <= self.duration_s,
-                     f"trigger '{trig.action}' at {trig.at_s}s is after the scenario end ({self.duration_s}s)")
+            _require(trig.latest_s <= self.duration_s,
+                     f"trigger '{trig.action}' at {trig.latest_s}s is after the scenario end ({self.duration_s}s)")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ScenarioConfig":
@@ -364,11 +466,13 @@ class ScenarioConfig:
         timeline_raw = data.get("timeline") or []
         _require(isinstance(pois_raw, list), "[pois] must be a list")
         _require(isinstance(timeline_raw, list), "[timeline] must be a list")
+        random_seed = meta.seed == RANDOM_SEED
         return cls(
             name=meta.name,
             description=meta.description.strip(),
             duration_s=float(meta.duration_s),
-            seed=meta.seed,
+            seed=fresh_seed() if random_seed else meta.seed,
+            random_seed=random_seed,
             area=build(Area, data.get("area"), "area"),
             gcs=build(GCSConfig, data.get("gcs"), "gcs"),
             uavs=build(SpawnConfig, data.get("uavs"), "uavs"),

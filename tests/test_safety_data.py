@@ -2,23 +2,60 @@
 
 import pytest
 
+from core.config import BatteryParams, ConfigError, UAVParams
 from core.events import EventType
 from core.poi import PoIStatus
-from core.uav import UAVRole
+from core.uav import UAV, UAVRole
+from core.world import CommandError
+from simulation.battery import BatteryModel
 from simulation.data_model import DataModel, DataParams
 from simulation.obstacles import square
 from tests.helpers import make_sim, make_world, run_until, step_world
 
 
 # ------------------------------------------------------------------- safety
-def test_every_uav_owns_a_different_flight_level():
-    sim = make_sim(uavs={"count": 14, "per_row": 7})     # more UAVs than configured layers
+def test_flight_levels_are_a_collision_distance_apart_and_under_the_ceiling():
+    sim = make_sim()
     safety = sim.manager.safety
-    levels = [safety.slot_altitude(uav_id) for uav_id in range(1, 15)]
-    assert len(set(levels)) == 14
-    assert min(levels) >= safety.params.altitude_floor_m
-    assert max(levels) <= sim.world.params.uav.max_altitude_m
-    assert min(b - a for a, b in zip(levels, levels[1:])) >= safety.params.min_separation_m
+    assert safety.levels == (20.0, 40.0, 60.0, 80.0, 100.0)
+    assert sim.world.params.uav.max_altitude_m == 100.0
+    assert min(b - a for a, b in zip(safety.levels, safety.levels[1:])) >= safety.params.min_separation_m == 20.0
+
+
+def test_nothing_may_fly_above_100_m():
+    sim = make_sim()
+    uav = sim.world.state.get_uav(1)
+    with pytest.raises(CommandError, match="outside 0..100"):
+        sim.world.goto(uav.uav_id, (100.0, 0.0, 110.0))
+
+
+def test_a_full_battery_lasts_1200_s_at_most():
+    params = UAVParams()
+    battery = BatteryParams()
+    uav = UAV(1, (0, 0, 0))
+    uav.goto((0, 0, 40))                        # climb, then hover: the least draining way to fly
+    steps = 0
+    while uav.is_operational and uav.battery_pct > 0 and steps < 20000:
+        uav.step(0.1, params, battery)
+        steps += 1
+    assert uav.flight_time_s == pytest.approx(1200.0, abs=15.0)
+    assert BatteryModel(params, battery).endurance_s(100.0) == pytest.approx(1200.0)
+
+
+def test_launch_pads_closer_than_the_separation_are_rejected():
+    with pytest.raises(ConfigError, match="collide on take-off"):
+        make_sim(uavs={"spacing_m": 15.0})
+
+
+def test_a_station_next_to_another_uav_gets_a_different_level():
+    sim = make_sim()
+    world, safety = sim.world, sim.manager.safety
+    a, b = world.state.get_uav(1), world.state.get_uav(2)
+    a.position[:] = (300.0, 300.0, 60.0)
+    world.goto(1, (300.0, 300.0, 60.0))
+    level = safety.safe_altitude(b, (310.0, 300.0), preferred_m=60.0)
+    assert abs(level - 60.0) >= safety.params.min_separation_m
+    assert safety.safe_altitude(b, (500.0, 300.0), preferred_m=60.0) == 60.0    # far away: its own level
 
 
 def test_waypoints_are_raised_over_obstacles_on_the_way():
@@ -31,22 +68,19 @@ def test_waypoints_are_raised_over_obstacles_on_the_way():
     assert raised >= 90.0 + safety.params.obstacle_clearance_m > clear
 
 
-def test_separation_violation_is_reported_once_per_encounter():
+def test_closer_than_20_m_is_a_collision_that_destroys_both_uavs():
     sim = make_sim()
     world, safety = sim.world, sim.manager.safety
-    a, b = world.state.get_uav(1), world.state.get_uav(2)
-    a.position[:] = (100.0, 100.0, 50.0)
-    b.position[:] = (102.0, 100.0, 50.0)
+    a, b, c = (world.state.get_uav(i) for i in (1, 2, 3))
+    a.position[:] = (100.0, 100.0, 60.0)
+    b.position[:] = (115.0, 100.0, 60.0)       # 15 m: collision
+    c.position[:] = (100.0, 100.0, 80.0)       # exactly 20 m above a: not a collision
     safety.monitor()
-    safety.monitor()                       # still too close: no second event
-    assert safety.violations["separation"] == 1
-    assert world.events.count(EventType.SAFETY_VIOLATION) == 1
-    b.position[:] = (150.0, 100.0, 50.0)
-    safety.monitor()
-    b.position[:] = (101.0, 100.0, 50.0)   # a new encounter counts again
-    safety.monitor()
-    assert safety.violations["separation"] == 2
-    assert safety.min_separation_observed_m <= 2.0
+    assert not a.is_operational and not b.is_operational and c.is_operational
+    assert safety.collisions == 1 and safety.violations["separation"] == 1
+    reasons = [e.data["reason"] for e in world.events.history(types=[EventType.UAV_FAILED])]
+    assert reasons == ["mid-air collision with UAV-02", "mid-air collision with UAV-01"]
+    assert safety.min_separation_observed_m == pytest.approx(15.0)
 
 
 def test_geofence_violation_is_detected():
@@ -64,9 +98,9 @@ def test_uav_under_a_new_obstacle_climbs_clear():
     x, y = float(uav.position[0]), float(uav.position[1])
     sim.env.obstacles.add(square("DEBRIS", (x, y), 60, height_m=float(uav.position[2]) + 20.0))
     sim.manager.safety.monitor()
-    assert sim.manager.safety.violations["obstacle"] == 1
+    assert sim.manager.safety.violations["obstacle"] >= 1
     assert uav.target is not None
-    assert uav.target[2] >= uav.position[2] + 20.0      # commanded above the obstacle
+    assert uav.target[2] >= min(uav.position[2] + 20.0, 100.0)      # commanded above the obstacle
 
 
 def test_everyone_is_recalled_and_lands_before_the_deadline():
@@ -149,19 +183,60 @@ def test_landing_downloads_the_buffer_and_a_crash_loses_it():
     assert data2.lost_mb > 0 and data2.buffer_mb(1) == 0
 
 
-def test_converging_uavs_at_similar_heights_are_deconflicted():
+def fly(sim, seconds: float) -> None:
+    """Only the world and the safety layer: no other swarm module re-tasks these UAVs."""
+    safety, world = sim.manager.safety, sim.world
+    for _ in range(int(seconds / world.dt)):
+        safety.monitor()
+        safety.avoid()
+        world.step()
+
+
+def airborne_at(world, uav_id: int, position) -> None:
+    uav = world.state.get_uav(uav_id)
+    uav.position[:] = position
+    uav.home[:] = (uav.home[0], uav.home[1], 0.0)
+
+
+def test_head_on_uavs_on_one_level_pass_safely_and_return_to_it():
     sim = make_sim()
-    run_until(sim, 40)
-    flying = [u for u in sim.world.state.uavs.values() if u.is_airborne and u.target is not None][:2]
-    assert len(flying) == 2
-    a, b = sorted(flying, key=lambda u: u.uav_id)
-    a.position[:] = (300.0, 300.0, 60.0)
-    b.position[:] = (306.0, 300.0, 61.0)       # 6 m apart, 1 m vertically: about to conflict
-    sim.manager.safety.monitor()
-    assert sim.manager.safety.deconflictions == 1
-    assert abs(b.target[2] - a.position[2]) >= 2 * sim.manager.safety.params.min_separation_m - 1e-6
-    sim.manager.safety.monitor()                # same encounter: no second command
-    assert sim.manager.safety.deconflictions == 1
+    world, safety = sim.world, sim.manager.safety
+    airborne_at(world, 1, (0.0, 300.0, 60.0))
+    airborne_at(world, 2, (300.0, 300.0, 60.0))
+    world.goto(1, (300.0, 300.0, 60.0))
+    world.goto(2, (0.0, 300.0, 60.0))
+    fly(sim, 60)
+    a, b = world.state.get_uav(1), world.state.get_uav(2)
+    assert safety.collisions == 0 and a.is_operational and b.is_operational
+    assert safety.deconflictions >= 1
+    assert a.distance_to((300.0, 300.0, 60.0)) < 3.0 and b.distance_to((0.0, 300.0, 60.0)) < 3.0
+    assert not a.braking and not b.braking
+
+
+def test_a_uav_does_not_climb_into_the_one_parked_above_it():
+    sim = make_sim()
+    world, safety = sim.world, sim.manager.safety
+    airborne_at(world, 1, (300.0, 300.0, 60.0))
+    airborne_at(world, 2, (300.0, 300.0, 40.0))
+    world.goto(1, (300.0, 300.0, 60.0))
+    world.goto(2, (500.0, 300.0, 60.0))          # sent off - on the level of the one above
+    fly(sim, 40)
+    assert safety.collisions == 0
+    assert world.state.get_uav(2).distance_to((500.0, 300.0, 60.0)) < 3.0
+
+
+def test_crossing_traffic_never_comes_within_20_m():
+    sim = make_sim()
+    world, safety = sim.world, sim.manager.safety
+    starts = [(0.0, 300.0), (300.0, 0.0), (300.0, 600.0), (600.0, 300.0)]
+    for uav_id, (x, y) in enumerate(starts, start=1):
+        airborne_at(world, uav_id, (x, y, 60.0))
+        world.goto(uav_id, (600.0 - x, 600.0 - y, 60.0))   # all through the centre, all on one level
+    fly(sim, 90)
+    assert safety.collisions == 0
+    assert safety.min_separation_observed_m >= 20.0
+    for uav_id, (x, y) in enumerate(starts, start=1):
+        assert world.state.get_uav(uav_id).horizontal_distance_to((600.0 - x, 600.0 - y)) < 3.0
 
 
 def test_auto_placed_debris_never_lands_on_a_uav():

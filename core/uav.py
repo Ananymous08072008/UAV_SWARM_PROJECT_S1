@@ -112,6 +112,7 @@ class UAV:
     distance_travelled_m: float = 0.0
     flight_time_s: float = 0.0
     climbing_out: bool = False   # taking off: climb to the flight level before flying on
+    braking: bool = False        # collision avoidance: hold x/y (keep the waypoint), still climb/descend
     home: np.ndarray = field(init=False)
 
     def __post_init__(self) -> None:
@@ -167,6 +168,7 @@ class UAV:
     def mark_failed(self) -> None:
         """Out of the mission: forced landing / crash at the current x, y."""
         self.health = HealthState.FAILED
+        self.braking = False
         self.target = None
         self.mode = FlightMode.HOLD
         self.velocity[:] = 0.0
@@ -190,7 +192,7 @@ class UAV:
         brake = BRAKE_MARGIN * p.max_accel_mps2
         if self.climbing_out and delta[2] <= TAKEOFF_ALT_TOL_M:
             self.climbing_out = False
-        if dist_h > 1e-6 and not self.climbing_out:
+        if dist_h > 1e-6 and not self.climbing_out and not self.braking:
             # Cruise, then brake along v = sqrt(2*a*d) so the UAV can stop on the waypoint.
             speed = min(p.cruise_speed_mps, math.sqrt(2.0 * brake * dist_h))
             desired[:2] = delta[:2] / dist_h * speed

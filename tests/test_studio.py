@@ -8,15 +8,17 @@ by test_dashboard.py and must keep working unchanged.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from core.config import ConfigError
+import dashboard.mission as mission_module
+from core.config import ConfigError, RandomPoIConfig, TriggerSpec
 from dashboard.api import create_app
-from dashboard.mission import MAX_POIS, MAX_UAVS, build_scenario, limits
+from dashboard.mission import MAX_POIS, MAX_UAVS, build_scenario, limits, template
 from dashboard.server import parse_args
 from dashboard.session import SessionError, SessionManager
 
@@ -59,9 +61,46 @@ def test_builder_uses_the_uav_count_and_pois_from_the_browser():
     assert scenario.pois[0].priority == 5
 
 
+def test_the_fleet_is_sized_to_the_mission_unless_the_browser_fixes_it():
+    assert build_scenario({}).uavs.auto                         # the template's default
+    assert build_scenario({"uav_count": "auto"}).uavs.auto
+    assert build_scenario({"uav_count": "AUTO "}).uavs.auto
+    assert build_scenario({"uav_count": 5}).uavs.count == 5
+    assert build_scenario({}).uavs.max_count <= MAX_UAVS        # the shared-server ceiling still holds
+
+
+def test_an_auto_session_reports_the_fleet_it_launched(manager):
+    session = manager.create({**SPEC, "uav_count": "auto"}, autostart=False)
+    status = session.status()
+    assert status["fleet"]["sizing"] == "auto"
+    assert status["uav_count"] == status["fleet"]["uavs"] == len(session.sim.world.state.uavs)
+
+
 def test_builder_without_a_spec_reproduces_the_template_scenario():
     assert build_scenario({}).uavs.count == build_scenario(None).uavs.count
-    assert build_scenario({}).pois
+    # The template's PoIs are drawn per run, so an empty map means random PoIs.
+    assert build_scenario({}).random_pois.max_count > 0
+
+
+def test_an_empty_map_and_no_map_both_mean_random_pois():
+    for spec in ({}, {"pois": []}):
+        scenario = build_scenario(spec)
+        assert scenario.pois == () and scenario.random_pois.max_count > 0
+
+
+def test_clicked_pois_are_not_topped_up_with_random_ones():
+    scenario = build_scenario({"pois": [{"x_m": 400, "y_m": 200}]})
+    assert [p.id for p in scenario.pois] == ["POI-1"]
+    assert scenario.random_pois.max_count == 0
+    assert scenario.random_pois.region_m == template().random_pois.region_m   # urgent PoI still has a region
+
+
+def test_each_mission_gets_its_own_seed_unless_one_is_given():
+    # The template is loaded once per server; reusing its seed would make every
+    # studio mission identical.
+    seeds = {build_scenario({}).seed for _ in range(5)}
+    assert len(seeds) > 1
+    assert build_scenario({"seed": 7}).seed == 7
 
 
 def test_builder_reflows_the_launch_grid_for_a_single_uav():
@@ -74,7 +113,6 @@ def test_builder_reflows_the_launch_grid_for_a_single_uav():
     ({"uav_count": 0}, "uav_count"),
     ({"uav_count": "many"}, "whole number"),
     ({"duration_s": 99999}, "duration_s"),
-    ({"pois": []}, "at least one PoI"),
     ({"pois": [{"x_m": 99999, "y_m": 0}]}, "outside the area"),
     ({"pois": [{"x_m": 400, "y_m": 200, "priority": 9}]}, "priority"),
     ({"pois": "nope"}, "must be a list"),
@@ -86,12 +124,33 @@ def test_builder_rejects_impossible_missions(spec, message):
     assert message in str(excinfo.value)
 
 
-def test_builder_drops_timeline_triggers_that_reference_missing_pois():
-    # The stock timeline completes POI-5 early; a custom mission has no POI-5,
-    # so that trigger would only ever log TRIGGER_REJECTED.
+def test_a_mission_with_no_pois_anywhere_is_rejected(monkeypatch):
+    # Only reachable with a template that has neither fixed nor random PoIs.
+    bare = replace(template(), pois=(), random_pois=RandomPoIConfig())
+    monkeypatch.setattr(mission_module, "_template", bare)
+    with pytest.raises(ConfigError, match="at least one PoI"):
+        build_scenario({"pois": []})
+
+
+def test_builder_drops_triggers_naming_missing_pois_but_keeps_selectors(monkeypatch):
+    # A trigger naming POI-5 would only log TRIGGER_REJECTED on a map without
+    # POI-5; a selector such as random_active picks a PoI at fire time instead.
+    base = replace(template(), timeline=(
+        TriggerSpec(100.0, "complete_poi", {"poi_id": "POI-5"}),
+        TriggerSpec(110.0, "complete_poi", {"poi_id": "random_active"}),
+        TriggerSpec(120.0, "complete_poi", {"poi_id": "POI-1"}),
+    ))
+    monkeypatch.setattr(mission_module, "_template", base)
     scenario = build_scenario({"pois": [{"x_m": 400, "y_m": 200}]})
-    referenced = [t.params.get("poi_id") for t in scenario.timeline]
-    assert all(ref is None or ref == "POI-1" for ref in referenced)
+    assert [t.params["poi_id"] for t in scenario.timeline] == ["random_active", "POI-1"]
+
+
+def test_builder_clips_event_windows_to_a_short_mission(monkeypatch):
+    base = replace(template(), timeline=(TriggerSpec([50.0, 200.0], "degrade_link", {"uav_id": 1}),
+                                         TriggerSpec([150.0, 300.0], "degrade_link", {"uav_id": 2})))
+    monkeypatch.setattr(mission_module, "_template", base)
+    timeline = build_scenario({"duration_s": 120}).timeline
+    assert [(t.at_s, t.latest_s) for t in timeline] == [(50.0, 120.0)]   # the second cannot fit
 
 
 def test_faults_can_be_switched_off():

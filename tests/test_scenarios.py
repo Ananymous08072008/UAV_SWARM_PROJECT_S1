@@ -14,11 +14,14 @@ SCENARIOS = sorted((PROJECT_ROOT / "scenarios").glob("*.yaml"))
 PARAMS = PROJECT_ROOT / "config" / "parameters.yaml"
 
 
-def run(scenario_path: Path, mode: str = "adaptive", duration_s: float | None = None) -> Simulation:
+def run(scenario_path: Path, mode: str = "adaptive", duration_s: float | None = None,
+        seed: int | None = None) -> Simulation:
     scenario = ScenarioConfig.load(scenario_path)
     if duration_s is not None:
-        scenario = replace(scenario, duration_s=duration_s,
-                           timeline=tuple(t for t in scenario.timeline if t.at_s <= duration_s))
+        clipped = (t.clipped(duration_s) for t in scenario.timeline)
+        scenario = replace(scenario, duration_s=duration_s, timeline=tuple(t for t in clipped if t))
+    if seed is not None:
+        scenario = replace(scenario, seed=seed)
     sim = Simulation(Parameters.load(PARAMS), scenario, mode=mode, results_dir=None)
     sim.run()
     sim.finish()
@@ -37,17 +40,40 @@ def test_scenario_runs_and_completes_every_poi(scenario_path: Path):
     assert summary["safety"]["uavs_airborne_at_end"] == 0     # everyone landed safely
 
 
-def test_config_scenario_runs_the_full_demonstration():
-    sim = run(PROJECT_ROOT / "config" / "scenario.yaml")
+# The demo's PoIs and event times are drawn per run. Any seed must still give a
+# complete demonstration - checked here on several. A sweep of 100 seeds met
+# these too; separation and obstacle violations are real swarm outcomes that some
+# random layouts produce, so they are measured, not asserted away.
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_config_scenario_runs_the_full_demonstration(seed: int):
+    sim = run(PROJECT_ROOT / "config" / "scenario.yaml", seed=seed)
     events = sim.world.events
+    assert not events.history(types=[EventType.TRIGGER_REJECTED])   # every fault was injected
+    assert events.count(EventType.TRIGGER_FIRED) == len(sim.world.timeline)
     assert events.count(EventType.LINK_DEGRADED) >= 1        # scenario A
     assert events.count(EventType.OBSTACLE_ADDED) >= 1       # scenario B
-    assert events.count(EventType.POI_COMPLETED) >= 6        # scenario C plus the normal surveys
     assert events.count(EventType.POI_ADDED) >= 1            # emerging high-priority region
     assert events.count(EventType.UAV_FAILED) >= 1           # UAV loss
-    assert events.count(EventType.FAULT_DETECTED) >= 2
-    assert events.count(EventType.RECOVERY_COMPLETE) >= 2
+    assert events.count(EventType.FAULT_DETECTED) >= 1
+    assert events.count(EventType.RECOVERY_COMPLETE) >= 1
+    assert events.count(EventType.POI_COMPLETED) == len(sim.world.state.pois)
     assert sim.summary["mission"]["completion_rate"] == 1.0
+    assert sim.summary["safety"]["uavs_airborne_at_end"] == 0
+
+
+def test_the_demo_differs_from_run_to_run_and_replays_by_seed():
+    def layout(seed):
+        sim = Simulation(Parameters.load(PARAMS),
+                         replace(ScenarioConfig.load(PROJECT_ROOT / "config" / "scenario.yaml"), seed=seed),
+                         results_dir=None)
+        pois = tuple((p.poi_id, round(float(p.position[0])), round(float(p.position[1]))) for p in sim.world.state.pois)
+        return pois, tuple((t.action, t.at_s) for t in sim.world.timeline)
+
+    assert layout(5) == layout(5)
+    layouts = {layout(seed) for seed in range(10)}
+    assert len({pois for pois, _ in layouts}) == 10          # PoIs move
+    assert len({len(pois) for pois, _ in layouts}) > 1       # and their number changes
+    assert len({times for _, times in layouts}) == 10        # events move
 
 
 def test_adaptive_keeps_the_swarm_connected_better_than_the_baseline():

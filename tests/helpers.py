@@ -11,7 +11,7 @@ from simulation.runner import Simulation
 SMALL_SCENARIO: dict[str, Any] = {
     "scenario": {"name": "test", "duration_s": 300.0, "seed": 7},
     "area": {"x_min_m": -200, "x_max_m": 900, "y_min_m": -200, "y_max_m": 700},
-    "uavs": {"count": 6, "formation": "grid", "per_row": 3, "spacing_m": 15.0, "start_m": [-15, -30]},
+    "uavs": {"count": 8, "formation": "grid", "per_row": 4, "spacing_m": 30.0, "start_m": [-15, -30]},
     "pois": [
         {"id": "POI-A", "position_m": [420, 120], "priority": 3, "survey_time_s": 60},
         {"id": "POI-B", "position_m": [640, 380], "priority": 4, "survey_time_s": 60},

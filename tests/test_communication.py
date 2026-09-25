@@ -32,14 +32,27 @@ def test_gcs_antenna_reaches_further():
     assert comm.range_for_pdr(0.85, involves_gcs=True) > comm.range_for_pdr(0.85) * 1.3
 
 
+def test_uav_to_uav_range_is_100_m_and_links_degrade_beyond_it():
+    comm = model()
+    assert comm.range_for_pdr(0.85) == pytest.approx(100.0, abs=0.5)
+
+    def pdr(d):
+        return comm.predict_pdr(np.array([0, 0, 60.0]), np.array([d, 0, 60.0]))
+
+    assert pdr(50) > 0.99 and pdr(100) >= 0.85 - 1e-3
+    assert pdr(100) > pdr(110) > pdr(120) > pdr(130)
+    assert pdr(120) < 0.65                              # clearly degraded past the range
+    assert pdr(140) < CommParams().link_down_pdr        # and the link drops out
+
+
 def test_obstacle_blocks_a_link_but_not_a_detour():
-    field = ObstacleField([square("B1", (100, 0), 60, height_m=60.0, attenuation_db=40.0)])
+    field = ObstacleField([square("B1", (40, 0), 24, height_m=60.0, attenuation_db=40.0)])
     comm = model(field)
-    through = comm.predict_pdr(np.array([0, 0, 50.0]), np.array([200, 0, 50.0]))
-    around = comm.predict_pdr(np.array([0, 0, 50.0]), np.array([200, 120, 50.0]))
+    through = comm.predict_pdr(np.array([0, 0, 50.0]), np.array([80, 0, 50.0]))
+    around = comm.predict_pdr(np.array([0, 0, 50.0]), np.array([80, 48, 50.0]))
     assert through < 0.05 < around
     # flying above the obstacle clears the link again
-    assert comm.predict_pdr(np.array([0, 0, 80.0]), np.array([200, 0, 80.0])) > 0.5
+    assert comm.predict_pdr(np.array([0, 0, 80.0]), np.array([80, 0, 80.0])) > 0.5
 
 
 def test_obstacle_geometry():

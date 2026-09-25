@@ -22,6 +22,7 @@ from core.config import build
 from core.events import EventType
 from core.uav import GCS_NODE_ID, UAV, UAVRole
 from swarm.energy_manager import EnergyManager, EnergyParams
+from swarm.fleet_planner import FleetParams
 from swarm.network_manager import NetworkManager
 from swarm.priority_manager import PriorityManager, PriorityParams
 from swarm.reconfiguration import ReconfigParams, ReconfigurationEngine
@@ -51,9 +52,11 @@ class SwarmParams:
     priority: PriorityParams = field(default_factory=PriorityParams)
     safety: SafetyParams = field(default_factory=SafetyParams)
     reconfiguration: ReconfigParams = field(default_factory=ReconfigParams)
+    fleet: FleetParams = field(default_factory=FleetParams)
 
     _SUB = {"routing": RouteParams, "allocation": AllocationParams, "relay": RelayParams, "energy": EnergyParams,
-            "priority": PriorityParams, "safety": SafetyParams, "reconfiguration": ReconfigParams}
+            "priority": PriorityParams, "safety": SafetyParams, "reconfiguration": ReconfigParams,
+            "fleet": FleetParams}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "SwarmParams":
@@ -98,11 +101,14 @@ class MissionManager:
             view = self.network.rebuild(world)
             self.routes.update(world, view)
         self.safety.monitor()
-        if world.t + 1e-9 < self._next_decision_s:
-            return
-        self._next_decision_s = world.t + self.params.decision_interval_s
-        view = self.network.view
+        if world.t + 1e-9 >= self._next_decision_s:
+            self._next_decision_s = world.t + self.params.decision_interval_s
+            self._decide(world)
+        # Last, so every plan - including commands issued just now - is checked before anything moves.
+        self.safety.avoid()
 
+    def _decide(self, world: "World") -> None:
+        view = self.network.view
         reasons = self.reconfig.evaluate(world, view)
         self.safety.enforce_deadline(self.roles)
         self.energy.update(world)
@@ -178,7 +184,11 @@ class MissionManager:
                 if uav.is_airborne and uav.role not in (UAVRole.RETURNING, UAVRole.CHARGING):
                     self.roles.return_home(uav, "mission complete")
         elif not pois.all_completed:
+            # A PoI appeared after everything was done: the mission is open again.
+            # Leaving the old completion time would let the run stop as soon as
+            # the first wave has landed, with the new PoI never flown.
             self._recalled = False
+            self.mission_complete_s = None
 
     @property
     def all_landed(self) -> bool:

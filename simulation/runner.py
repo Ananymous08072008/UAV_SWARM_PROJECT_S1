@@ -27,7 +27,8 @@ from core.config import Parameters, ScenarioConfig
 from core.events import EventType
 from core.world import CommandError, World
 from simulation.environment import Environment
-from swarm.mission_manager import MissionManager
+from swarm.fleet_planner import plan_fleet
+from swarm.mission_manager import MissionManager, SwarmParams
 from swarm_logging.database import RunDatabase
 from swarm_logging.event_logger import EventLogger
 from swarm_logging.metrics import MetricsCollector
@@ -48,6 +49,12 @@ class Simulation:
                  gateway: Optional["MavlinkGateway"] = None, stop_when_complete: bool = True) -> None:
         self.world = World(params, scenario)
         self.env = Environment(self.world)
+        if scenario.uavs.auto:
+            # Before the MissionManager: its safety layer allots one flight level per UAV.
+            # Sized the same way in both modes, so adaptive and baseline fly equal fleets.
+            swarm = SwarmParams.from_dict(params.section("swarm"))
+            fleet = plan_fleet(self.world, self.env, swarm.relay, swarm.fleet, swarm.allocation.reserve_pct)
+            self.world.spawn_fleet(fleet.total, fleet.to_dict())
         self.manager = MissionManager(self.world, self.env, mode)
         self.metrics = MetricsCollector(self.world, self.env, self.manager)
         self.hub = hub
@@ -87,7 +94,11 @@ class Simulation:
     def is_finished(self) -> bool:
         if self.world.is_finished:
             return True
+        # all_completed is checked directly as well: mission_complete_s is only
+        # re-evaluated once per decision cycle, and a PoI that appeared since then
+        # must keep the run going even if every UAV has already landed.
         return bool(self.stop_when_complete and self.manager.mission_complete_s is not None
+                    and self.world.state.pois.all_completed
                     and self.manager.all_landed and self.world.pending_triggers == 0)
 
     def start(self) -> None:

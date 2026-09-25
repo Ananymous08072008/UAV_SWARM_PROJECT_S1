@@ -65,7 +65,7 @@ Rules that keep the system understandable:
 | `swarm/role_manager.py` | allowed role transitions, flight levels, obstacle clearance |
 | `swarm/energy_manager.py` | RTH thresholds, relay hand-over, idle recharge |
 | `swarm/priority_manager.py` | ageing priorities and pre-emption for emerging regions |
-| `swarm/safety_manager.py` | separation, geofence, obstacle avoidance, mission deadline recall |
+| `swarm/safety_manager.py` | collisions, collision avoidance, geofence, obstacle avoidance, mission deadline recall |
 | `swarm/reconfiguration.py` | fault detection, re-plan requests, incident and recovery measurement |
 | `swarm/mission_manager.py` | fixed decision order; `adaptive` vs `baseline` mode |
 | `telemetry/*` | MAVLink gateway (one socket, one system id per UAV), message builders, unit conversion, wall-clock rates, monitor tool |
@@ -85,8 +85,10 @@ est    = EWMA(PDR)            link up if est >= 0.55, down if est < 0.45 (hyster
 latency = hop_latency + retx_latency * (1/PDR - 1)
 ```
 
-With the shipped values a healthy UAV-UAV link reaches ~193 m at 85 % PDR (~240 m at 50 %) and a
-UAV-GCS link ~328 m thanks to the ground antenna. Obstacles add 25-40 dB when the straight 3D
+With the shipped values a healthy UAV-UAV link has its maximum range at 100 m (85 % PDR, the
+quality relays are planned for) and degrades beyond it (~73 % at 110 m, ~59 % at 120 m, dropping
+out around 130 m), so relays are spaced 90 m apart. A UAV-GCS link reaches ~328 m thanks to the
+high-gain ground antenna. Obstacles add 25-40 dB when the straight 3D
 segment passes through their prism.
 
 ### 3.2 Routing
@@ -143,11 +145,15 @@ count as a recovery.
 * RTH when `battery <= return_cost + reserve` (never below the critical floor).
 * A relay inside the hand-over margin keeps relaying until its replacement is on station
   (or `max_handover_wait_s`), then flies home - connectivity is not interrupted by recharging.
-* Each UAV owns a flight level (`40 m + (id - 1) * 6 m`, auto-fitted to the fleet size and the
-  120 m ceiling) and climbs to it before translating, so crossing paths are vertically separated;
-  waypoints are raised over obstacles.
-* Reactive deconfliction: when two UAVs come within 2x the minimum separation at similar heights
-  (e.g. one raised over an obstacle into another's level), the higher-numbered one changes altitude.
+* A full battery lasts 1200 s at most (hovering; ~15 min flying at cruise speed).
+* Two airborne UAVs closer than 20 m **collide and are both lost**. Nothing flies above 100 m.
+* Flight levels every 20 m (20, 40, 60, 80, 100 m), so UAVs on different levels can never collide.
+  Waypoints take their role's level - survey 40, relay 60, return home 80 - unless another UAV is
+  stationed within 30 m there, and are raised over obstacles. Launch pads are 30 m apart.
+* Predictive avoidance, every tick after the swarm's decisions: each plan is projected 12 s ahead
+  (including a returning UAV's landing descent). For a predicted conflict, the moving UAV (or else
+  the higher id) takes the least disruptive plan that stays clear of everyone's projected path -
+  carry on, change level, hold position, or stop - and returns to its level once clear.
 * Every UAV is recalled early enough to land before the mission deadline; tasks that cannot finish
   in time are never assigned.
 
@@ -158,7 +164,7 @@ count as a recovery.
 | Mission | PoI completion rate and time, allocation runtime, response time to new high-priority regions, task reallocations, pre-emptions |
 | Communication | route PDR, latency, share of UAVs connected (network availability), full-connectivity fraction, downtime, disconnections, route changes, imagery delivered / live share / delay |
 | Resilience | incidents, detection time, recovery time, affected UAVs reconnected (share, time), unrecovered incidents, relay changes, hand-overs, re-plans |
-| Safety | minimum separation, separation/geofence/obstacle violations, UAVs lost, UAVs still airborne at the end |
+| Safety | minimum separation, collisions, avoidance manoeuvres, geofence/obstacle violations, UAVs lost, UAVs still airborne at the end |
 | Efficiency | distance flown, flight time, energy consumed, battery left, relay utilisation, RTH count |
 
 ## 5. Verification
@@ -171,7 +177,7 @@ API, and every shipped scenario end to end (completion, safety, reproducibility)
 ## 6. Known limitations
 
 * Kinematic UAV model (no wind or attitude dynamics); no 4D path planning - separation comes from
-  flight levels plus monitoring, not from trajectory deconfliction.
+  flight levels plus short-horizon predictive avoidance, not from planning whole trajectories.
 * Flat-earth coordinate conversion (valid within a few km of the origin).
 * Perfect knowledge of the swarm's own state: the decisions run centrally, as a GCS-side planner
   would; a decentralised version is future work.

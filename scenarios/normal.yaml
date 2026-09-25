@@ -3,7 +3,7 @@
 scenario:
   name: normal
   description: >
-    Six UAVs, two PoIs behind the radio horizon. Nothing is injected, so this run is the
+    Eight UAVs, two PoIs behind the radio horizon. Nothing is injected, so this run is the
     reference for connectivity, imagery delay and energy use.
   duration_s: 540.0
   seed: 42
@@ -20,10 +20,10 @@ gcs:
 disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
 
 uavs:
-  count: 6
+  count: 8                        # 2 surveyors + 5 relays (100 m radio range) + 1 spare
   formation: grid
   per_row: 3
-  spacing_m: 15.0
+  spacing_m: 30.0                 # >= swarm.safety.min_separation_m, or neighbours collide on take-off
   start_m: [-20.0, -40.0]
   initial_battery_pct: 100.0
 

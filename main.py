@@ -73,12 +73,14 @@ def build_simulation(args: argparse.Namespace):
     changes = {}
     if args.duration is not None:
         changes["duration_s"] = args.duration
-        kept = tuple(t for t in scenario.timeline if t.at_s <= args.duration)
+        clipped = (t.clipped(args.duration) for t in scenario.timeline)
+        kept = tuple(t for t in clipped if t is not None)
         if len(kept) != len(scenario.timeline):
             print(f"Note: --duration {args.duration:g} skips {len(scenario.timeline) - len(kept)} timeline trigger(s)")
         changes["timeline"] = kept
     if args.seed is not None:
         changes["seed"] = args.seed
+        changes["random_seed"] = False
     if changes:
         scenario = replace(scenario, **changes)
 
@@ -140,6 +142,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
+
+    world = sim.world
+    if world.scenario.random_seed:
+        # Everything random in this run - PoI count and placement, fault times,
+        # radio fading - follows from this one number, so print it for replays.
+        print(f"Seed {world.seed} (drawn for this run; replay it with --seed {world.seed})")
 
     if not args.quiet:
         def printer(event):

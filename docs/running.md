@@ -33,7 +33,8 @@ simulation of its own — every visitor builds and runs their own.
 
 **Design a mission.** Drag the UAV count (1–40), duration and speed. Pick
 adaptive or baseline. Click the map to drop Points of Interest, set each one's
-priority, click a PoI to remove it. Leave the map empty to use the standard six.
+priority, click a PoI to remove it. Leave the map empty for a random set of PoIs,
+drawn fresh for every mission.
 Then press **Launch mission**.
 
 **Drive it.** Pause, resume, restart, and change speed while it runs; inject
@@ -75,26 +76,25 @@ Mission Planner is not available in studio mode; use Path A for MAVLink.
 
 ## Getting the data out of a run
 
-Both dashboards have a **Download data** button — in the studio's control bar,
-and in the header of `main.py --dashboard`. It saves the run as one zip:
+Both dashboards have a **Download data (Excel)** button — in the studio's control
+bar, and in the header of `main.py --dashboard`. It saves the run as one Excel
+workbook (`.xlsx`, opens in Excel, LibreOffice Calc or Google Sheets) with three
+sheets:
 
 ```
-20260923_131433_custom_adaptive_a6d5c6c50666/
-  summary.json      the grouped metrics: mission, communication, resilience, safety, efficiency
-  timeseries.csv    one row per second: connectivity, PDR, latency, battery, PoIs, incidents
-  events.csv        every event, spreadsheet friendly
-  events.jsonl      every event, full detail including the data payload
-  scenario.json     what was run — and for a studio run, the mission you built
-  manifest.json     when it was exported, how many events, and whether any were lost
+20260923_131433_custom_adaptive_a6d5c6c50666.xlsx
+  Mission metrics     the grouped results: run (incl. how the fleet was sized), mission,
+                      communication, resilience, safety, efficiency
+  Metrics over time   one row per second: connectivity, PDR, latency, battery, PoIs, incidents
+  Event log           every event: time, type, severity, UAV, PoI, message, details
 ```
 
-Those are the same file names and columns a `results/<run>/` directory uses, so
-anything that reads one reads the other — `experiments/plot_results.py`, a
-spreadsheet, or pandas:
+The event log has filters on its header row, so you can narrow it to one UAV or
+one event type straight away. From Python:
 
 ```python
 import pandas as pd
-ts = pd.read_csv("20260923_131433_custom_adaptive_a6d5c6c50666/timeseries.csv")
+ts = pd.read_excel("20260923_131433_custom_adaptive_a6d5c6c50666.xlsx", sheet_name="Metrics over time")
 ts.plot(x="t_s", y=["connectivity_ratio", "mean_route_pdr"])
 ```
 
@@ -108,15 +108,47 @@ written automatically at the end of every run. The button matters there when you
 started with `--no-results`, or when the browser is not on the machine running
 the simulation.
 
-You can download a run that is still going; `manifest.json` records
-`"run_finished": false` so a half-run is never mistaken for a complete one.
+You can download a run that is still going; the *Export* rows at the top of
+*Mission metrics* say `Run finished: FALSE` so a half-run is never mistaken for a
+complete one.
 
-> **A note on completeness.** The event log in the archive is the whole run. It
+> **A note on completeness.** The event log in the workbook is the whole run. It
 > is recorded separately for this purpose, because the two buffers the dashboard
 > uses to draw itself are both bounded ring buffers — 2000 events in the
 > `EventBus`, 500 in the `LiveHub` — and on a long run each holds only the tail.
-> If anything is ever dropped, `manifest.json` reports `events_dropped` and sets
-> `"complete": false` rather than presenting a partial log as a whole one.
+> If anything is ever dropped, the *Event log* row under *Export* says so rather
+> than presenting a partial log as a whole one.
+
+## How many UAVs fly
+
+The demo scenario and the studio size the fleet to the mission
+(`uavs: {count: auto}`): the fewest surveyors that can still finish every PoI
+before the deadline, flying them one after another in priority order, plus the
+relays that keep the highest-priority PoIs connected to the GCS, plus a spare,
+plus one UAV per scheduled UAV loss or new PoI. PoIs usually outnumber
+surveyors, so the swarm queues them by priority. The breakdown is printed at start-up
+(`FLEET_PLANNED`), shown under **UAVs** in the studio header, and recorded in the
+*Mission metrics* sheet. Tune it in `config/parameters.yaml` under `swarm.fleet`;
+`uavs.max_count` caps it. Untick **Size the fleet to the mission** in the studio,
+or give `count` a number in a scenario file, to fix the fleet size instead — the
+focused scenarios in `scenarios/` do, because each is a controlled experiment.
+
+## Operating limits
+
+| Limit | Value | Where |
+|---|---|---|
+| Mission time (demo, studio default) | 2700 s | `config/scenario.yaml` `scenario.duration_s` |
+| Maximum flight time | 1200 s on a full battery (hovering; ~15 min at cruise speed) | `parameters.yaml` `battery.hover_drain_pct_per_min: 5.0` |
+| UAV-UAV radio range | 100 m at 85 % PDR; degrades beyond (~59 % at 120 m, gone by ~130 m) | `parameters.yaml` `communication.tx_power_dbm` |
+| UAV-GCS radio range | ~328 m (unchanged, high-gain ground antenna) | `communication.gcs_antenna_gain_dbi` |
+| Maximum height | 100 m | `uav.max_altitude_m` |
+| Minimum separation | 20 m - closer is a **collision and both UAVs are lost** | `swarm.safety.min_separation_m` |
+
+The swarm keeps to them on its own: relays are spaced 90 m apart, UAVs fly on
+levels 20 m apart (20-100 m), and every tick the safety layer looks 12 s ahead
+and moves a UAV to another level or holds it in place before two could come
+within 20 m. Launch pads are 30 m apart for the same reason. A mission longer
+than a battery simply rotates UAVs home to recharge.
 
 ---
 
@@ -178,19 +210,39 @@ python experiments/plot_results.py
 
 ### 3. Confirm it worked
 
-A healthy headless run ends with a summary containing:
+**Every run of the demo is different.** It draws a new seed each time, and from it
+4-8 PoIs at random places in the disaster zone plus a random time for each fault
+inside its window (`config/scenario.yaml`). The first line of output is the seed:
 
 ```
-pois_completed               7
-completion_rate              1.0
-incidents_recovered          3
-incidents_unrecovered        0
-data_delivery_ratio          1.0
-separation_violations        0
+Seed 1257299661 (drawn for this run; replay it with --seed 1257299661)
 ```
 
-`incidents_unrecovered 0` and `completion_rate 1.0` are the two numbers that
-say the swarm did its job.
+`python main.py --seed 1257299661` replays that run exactly - same PoIs, same event
+times, same result. Use it to investigate a run you saw, or to record a video.
+
+Because the mission changes, so do the numbers. What every run should show:
+
+```
+completion_rate              1.0      every PoI surveyed, including the urgent one
+uavs_airborne_at_end         0        everyone landed
+```
+
+and no `TRIGGER_REJECTED` line in the log: all six faults were injected. When a
+fault's target does not exist at its drawn time (say, no relay while the chain is
+being rebuilt), it waits for one and the log says so: `(planned for 124.4s,
+waited 2.0s for a target)`.
+
+These vary with the layout, and are what the randomness is there to measure. Over
+100 random runs: about 1 run in 5 ends with an unrecovered incident, 1 in 10 has a
+separation near-miss, and about a third record a UAV inside the debris before it
+climbs clear. The fixed layout the demo used before hid all of that - it recovered
+every incident on every seed.
+
+The focused scenarios in `scenarios/` are unchanged: fixed PoIs, fixed event
+times and `seed: 42`, so they stay controlled, comparable experiments. Any of them
+can opt in with the same syntax - `seed: random`, `random_pois: {count: [4, 8],
+region_m: [...]}`, and `at_s: [earliest, latest]` on a timeline entry.
 
 To stop a dashboard or demo run, press **Ctrl+C**. The dashboard keeps serving
 the final state after the mission ends, so Ctrl+C is how you exit.
@@ -338,7 +390,7 @@ target address, which does not cross a hosting boundary. Use Path A for MAVLink.
 |---|---|
 | `--mode adaptive\|baseline` | `baseline` disables the research contributions for comparison |
 | `--duration N` | Override the scenario length in seconds |
-| `--seed N` | Override the random seed (default 42) for a repeatable run |
+| `--seed N` | Replay run N exactly: same PoIs, same event times, same radio fading. Without it the demo draws a new seed each run |
 | `--realtime` | Pace the simulation against the wall clock |
 | `--speed N` | Real-time multiplier, used with `--realtime` |
 | `--dashboard` | Serve the live dashboard |

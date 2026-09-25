@@ -211,8 +211,9 @@ class SimulationSession:
             "t_s": round(sim.world.t, 1),
             "duration_s": self._scenario.duration_s,
             "scenario": self._scenario.name,
-            "uav_count": self._scenario.uavs.count,
-            "poi_count": len(self._scenario.pois),
+            "uav_count": len(sim.world.state.uavs),
+            "fleet": dict(sim.world.fleet),
+            "poi_count": len(sim.world.state.pois),
             "created_at": self.created_at,
             "age_s": round(time.time() - self.created_at, 1),
             "summary": sim.summary,
@@ -254,7 +255,7 @@ class SessionManager:
         if autostart:
             session.start()
         log.info("session %s created (%d UAVs, %d PoIs)", session.id,
-                 session._scenario.uavs.count, len(session._scenario.pois))
+                 len(session.sim.world.state.uavs), len(session.sim.world.state.pois))
         return session
 
     def get(self, session_id: str) -> SimulationSession:

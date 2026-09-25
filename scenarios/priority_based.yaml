@@ -1,0 +1,60 @@
+# Priority-based survey with a small fleet
+# ---------------------------------------------------------------------
+# Real deployments rarely have one UAV per PoI. Here the fleet is sized to
+# the fewest surveyors that can still finish every PoI before the deadline
+# (uavs.count: auto), so there are far more PoIs than surveyors and
+# the swarm has to decide which PoI to fly next:
+#   * PoIs are taken highest effective priority first (priority + ageing,
+#     swarm/priority_manager.py), so low-priority PoIs are delayed, not starved;
+#   * a surveyor that finishes one PoI is re-tasked to the next in the queue;
+#   * the urgent PoI injected mid-mission pre-empts a lower-priority surveyor.
+# PoI count, placement, priority and survey time are drawn from the seed, so
+# the fleet size changes every run. `python main.py --seed N` replays run N.
+
+scenario:
+  name: priority_based
+  description: >
+    A minimal fleet surveys 8-14 randomly placed PoIs of mixed priority,
+    flying them one after another in priority order. An urgent PoI appears
+    mid-mission and pre-empts lower-priority work.
+  duration_s: 2400.0
+  seed: random
+
+area:
+  x_min_m: -200.0
+  x_max_m: 1100.0
+  y_min_m: -300.0
+  y_max_m: 900.0
+
+gcs:
+  position_m: [0.0, 0.0, 0.0]
+
+disaster_zone: [[200, -150], [1000, -150], [1000, 800], [150, 800]]
+
+uavs:
+  count: auto                     # fewest surveyors that finish in time (not one per PoI)
+  max_count: 20
+  formation: grid
+  per_row: 5
+  spacing_m: 30.0                 # >= swarm.safety.min_separation_m, or neighbours collide on take-off
+  start_m: [-30.0, -50.0]
+  initial_battery_pct: 100.0
+  battery_overrides: {}
+
+pois: []
+
+random_pois:
+  count: [8, 14]
+  region_m: [200.0, -150.0, 1000.0, 800.0]
+  min_spacing_m: 120.0
+  priority: [1, 5]
+  survey_time_s: [40.0, 90.0]
+  margin_m: 20.0
+
+obstacles: []
+
+timeline:
+  # Survivors reported: a new top-priority PoI while the queue is still long.
+  - at_s: [200.0, 500.0]
+    action: add_poi
+    params: {id: POI-URGENT, position_m: random, priority: 5, survey_time_s: 60.0}
