@@ -42,7 +42,7 @@ EXPOSE 8000
 # --keep-running plays the full scenario duration even after the mission completes.
 # Override at run time, e.g.  docker run uav-swarm python main.py --help
 CMD ["python", "main.py", "--dashboard", "--host", "0.0.0.0", "--port", "8000", \
-     "--realtime", "--keep-running", "--duration", "3600", "--quiet", "--no-results"]
+     "--realtime", "--keep-running", "--duration", "2700", "--quiet", "--no-results"]
 
 # Uses urllib rather than curl, which python:3.12-slim does not ship.
 # Probes /api/actions, not /api/state: create_app only registers /api/state when a

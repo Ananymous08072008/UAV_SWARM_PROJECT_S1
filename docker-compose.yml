@@ -42,4 +42,4 @@ services:
     # The default CMD writes nothing to disk. To persist a run instead:
     # command: >
     #   python main.py --dashboard --host 0.0.0.0 --port 8000
-    #   --realtime --keep-running --duration 3600 --quiet
+    #   --realtime --keep-running --duration 2700 --quiet
