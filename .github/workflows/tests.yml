@@ -39,4 +39,4 @@ jobs:
       - name: Smoke-test a headless simulation run
         env:
           MPLBACKEND: Agg
-        run: python main.py --duration 300 --quiet --no-results
+        run: python main.py --duration 30 --realtime --speed 30 --quiet --no-results
