@@ -38,10 +38,10 @@ services:
       - key: MAX_SESSIONS
         value: "2"
 
-      # Reap abandoned simulations after 10 minutes instead of 30. On two slots
-      # a forgotten tab is the difference between the site working and a
-      # stranger seeing "server is at capacity".
+      # Default session lifetime for an idle mission studio tab: 45 minutes.
+      # This keeps the deployed app from reaping sessions too aggressively while
+      # still preventing stale worlds from consuming resources forever.
       - key: IDLE_TIMEOUT
-        value: "600"
+        value: "2700"
 
     # PORT is injected by Render and read by dashboard/server.py. Do not set it.

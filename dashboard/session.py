@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 
 # A shared box has to bound what visitors can start.
 MAX_SESSIONS = 8
-IDLE_TIMEOUT_S = 1800.0      # reap a session nobody has polled for 30 minutes
+IDLE_TIMEOUT_S = 2700.0      # reap a session nobody has polled for 45 minutes
 MAX_SPEED = 20.0
 MIN_SPEED = 0.25
 
