@@ -248,7 +248,8 @@ class GCSConfig:
 class SpawnConfig:
     """The launch pad. ``count: auto`` lets swarm/fleet_planner.py size the fleet
     to the mission - the fewest surveyors that still finish every PoI in time,
-    one after another by priority - never above ``max_count``."""
+    one after another by priority - never below ``min_count`` (the shortfall is
+    flown as extra spares) and never above ``max_count``."""
 
     count: int | str = 6
     formation: str = "grid"
@@ -257,6 +258,7 @@ class SpawnConfig:
     start_m: tuple[float, float] = (0.0, 0.0)
     initial_battery_pct: float = 100.0
     battery_overrides: Mapping[int, float] = field(default_factory=dict)
+    min_count: int = 1
     max_count: int = 40
 
     def __post_init__(self) -> None:
@@ -265,6 +267,8 @@ class SpawnConfig:
                  f"count must be an integer in 1..{MAX_UAVS} or '{AUTO_COUNT}'")
         _require(isinstance(self.max_count, int) and 1 <= self.max_count <= MAX_UAVS,
                  f"max_count must be an integer in 1..{MAX_UAVS}")
+        _require(isinstance(self.min_count, int) and 1 <= self.min_count <= self.max_count,
+                 f"min_count must be an integer in 1..max_count ({self.max_count})")
         _require(self.formation in ("grid", "line"), "formation must be 'grid' or 'line'")
         _require(isinstance(self.per_row, int) and self.per_row >= 1, "per_row must be an integer >= 1")
         _require(self.spacing_m > 0, "spacing_m must be > 0")
@@ -325,14 +329,19 @@ class RandomPoIConfig:
     them, e.g. to the disaster zone, instead of the whole operating area.
     ``min_spacing_m`` keeps them apart; if the region is too crowded to honour it
     the most spread-out candidate is used rather than failing the run.
+
+    Priority is not drawn: it comes from geography, once every position is known
+    (core/world.py, ``_spatial_priorities``) - PoIs that cluster together are worth
+    visiting as a group, an isolated one less so unless it is close to the GCS.
+    ``cluster_radius_m`` is how close two PoIs must be to count as the same cluster.
     """
 
     count: int | tuple[int, int] = 0
-    priority: tuple[int, int] = (1, 5)
     survey_time_s: tuple[float, float] = (30.0, 90.0)
     margin_m: float = 20.0
     region_m: Optional[tuple[float, float, float, float]] = None
     min_spacing_m: float = 0.0
+    cluster_radius_m: float = 250.0
 
     def __post_init__(self) -> None:
         if isinstance(self.count, (list, tuple)):
@@ -348,10 +357,7 @@ class RandomPoIConfig:
             _require(x0 < x1 and y0 < y1, "region_m must be [x_min, y_min, x_max, y_max] with min < max")
             object.__setattr__(self, "region_m", (x0, y0, x1, y1))
         _require(self.min_spacing_m >= 0, "min_spacing_m must be >= 0")
-        lo, hi = _float_tuple(self.priority, 2, "priority")
-        _require(1 <= lo <= hi <= 5 and lo.is_integer() and hi.is_integer(),
-                 "priority must be [low, high] integers within 1..5")
-        object.__setattr__(self, "priority", (int(lo), int(hi)))
+        _require(self.cluster_radius_m > 0, "cluster_radius_m must be > 0")
         t_lo, t_hi = _float_tuple(self.survey_time_s, 2, "survey_time_s")
         _require(0 < t_lo <= t_hi, "survey_time_s must be [low, high] with 0 < low <= high")
         object.__setattr__(self, "survey_time_s", (t_lo, t_hi))

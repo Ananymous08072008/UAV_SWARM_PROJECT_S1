@@ -70,6 +70,7 @@ class EventType(str, Enum):
     RELAY_ASSIGNED = "RELAY_ASSIGNED"
     RELAY_RELEASED = "RELAY_RELEASED"
     HANDOVER_STARTED = "HANDOVER_STARTED"    # relay leaving, replacement requested
+    DATA_FERRY_ASSIGNED = "DATA_FERRY_ASSIGNED"  # last-resort survey with no relay chain
     # swarm resilience
     FAULT_DETECTED = "FAULT_DETECTED"
     RECONFIGURATION = "RECONFIGURATION"

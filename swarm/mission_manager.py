@@ -26,7 +26,7 @@ from swarm.fleet_planner import FleetParams
 from swarm.network_manager import NetworkManager
 from swarm.priority_manager import PriorityManager, PriorityParams
 from swarm.reconfiguration import ReconfigParams, ReconfigurationEngine
-from swarm.relay_selector import RelayParams, RelaySelector
+from swarm.relay_selector import RelayParams, RelaySelector, Terminal
 from swarm.role_manager import RoleManager
 from swarm.route_manager import RouteManager, RouteParams
 from swarm.safety_manager import SafetyManager, SafetyParams
@@ -88,6 +88,7 @@ class MissionManager:
         self.reconfig = ReconfigurationEngine(world, env, self.routes, self.relays,
                                               replace(self.params.reconfiguration, enabled=adaptive))
         self.reconfig.ferrying = self.allocator.ferrying   # intentionally disconnected UAVs
+        self.relays.skip = self.allocator.ferry_pois       # ... whose PoIs need no relay chain
         world.register_uav_selector("critical_relay", lambda w: self.routes.critical_relay(w))
         world.register_point_selector("backbone_midpoint",
                                       lambda w: self.routes.backbone_midpoint(self.env.comm.positions))
@@ -111,15 +112,31 @@ class MissionManager:
         view = self.network.view
         reasons = self.reconfig.evaluate(world, view)
         self.safety.enforce_deadline(self.roles)
-        self.energy.update(world)
+        self.energy.update(world, self._has_pending_work)
         self.allocator.allocate(world)
         self.priority.update(world, self.allocator.can_do)
-        if self.relays.update(world, view, force=bool(reasons)) and reasons:
+        lookahead = self._lookahead_terminals()
+        if self.relays.update(world, view, lookahead=lookahead, force=bool(reasons)) and reasons:
             world.publish(EventType.RECONFIGURATION, f"Re-planned after: {'; '.join(reasons[:3])}",
                           data={"reasons": reasons, "relays": self.relays.plan.relay_count})
         self._manage_spares(world, view)
         self.reconfig.check_recovery(world)
         self._check_mission_complete(world)
+
+    def _lookahead_terminals(self) -> list[Terminal]:
+        """The next few PoIs still in the queue (swarm/task_allocator.py fills ``allocator.pending``
+        every tick), so the relay planner can reach toward them ahead of a surveyor being sent."""
+        alt = self.params.relay.relay_altitude_m
+        return [Terminal(p.poi_id, np.array([*p.position[:2], alt]), p.priority)
+               for p in self.allocator.pending[:self.params.relay.lookahead_pois]]
+
+    def _has_pending_work(self, uav: UAV) -> bool:
+        """True if this UAV could still fly a pending PoI the allocator is able to hand out -
+        used to hold off a proactive recharge that would pull a usable UAV out of the mission.
+        A PoI waiting for a relay path does not count: holding a UAV in the air for one would
+        only leave it hovering with no role until its reserve forces it home anyway."""
+        waiting = self.allocator.waiting
+        return any(self.allocator.can_do(uav, p) for p in self.allocator.pending if p.poi_id not in waiting)
 
     # ------------------------------------------------------------------ spares
     def _manage_spares(self, world: "World", view) -> None:
@@ -145,13 +162,19 @@ class MissionManager:
                 self.roles.make_backup(uav, staging, "staging point moved")
 
     def _staging_point(self, world: "World") -> Optional[np.ndarray]:
-        """Midway between the GCS and the relay backbone: connected and close to where help is needed."""
+        """Toward the next queued PoI, no farther than the relay backbone already reaches (or
+        the GCS, with no backbone yet): connected, and a head start on whichever PoI a backup
+        is likely to fly next, instead of just parking near the network."""
         points = [p for p, _ in self.relays.assignment.values()]
-        gcs = world.state.gcs_position
-        if not points:
+        gcs = np.asarray(world.state.gcs_position[:2], dtype=float)
+        anchor = gcs if not points else np.mean([p[:2] for p in points], axis=0)
+        pending = self.allocator.pending
+        if pending:
+            mid = (anchor + np.asarray(pending[0].position[:2], dtype=float)) / 2.0
+        elif points:
+            mid = (gcs + anchor) / 2.0
+        else:
             return None
-        centre = np.mean([p[:2] for p in points], axis=0)
-        mid = (np.asarray(gcs[:2], dtype=float) + centre) / 2.0
         return np.array([mid[0], mid[1], self.params.relay.relay_altitude_m])
 
     def _ferry(self, world: "World", uav: UAV) -> bool:

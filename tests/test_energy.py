@@ -4,7 +4,7 @@ from core.config import Parameters
 from core.events import EventType
 from core.uav import UAV, UAVRole
 from simulation.battery import BatteryModel
-from tests.helpers import make_sim, run_until
+from tests.helpers import make_sim, run_until, step_world
 
 
 def test_estimates_grow_with_distance_and_hover_time():
@@ -76,6 +76,22 @@ def test_critical_battery_beats_the_handover_wait():
     sim.world.set_battery(relay.uav_id, sim.manager.energy.needed_pct(relay) - 1.0, "test")
     run_until(sim, 85)
     assert relay.role is UAVRole.RETURNING
+
+
+def test_an_idle_uav_with_nothing_to_do_parks_instead_of_hovering():
+    """Above the recharge threshold too: hovering with no role only burns battery."""
+    sim = make_sim()
+    run_until(sim, 40)
+    idle, busy = [u for u in sim.world.state.uavs.values() if u.is_airborne][:2]
+    for uav in (idle, busy):
+        sim.world.release_uav(uav.uav_id, "test")
+    energy = sim.manager.energy
+    energy.update(sim.world, lambda u: u is busy)        # starts both idle clocks
+    step_world(sim.world, sim.world.t + energy.params.idle_recharge_after_s + 1)
+    energy.update(sim.world, lambda u: u is busy)
+    assert idle.battery_pct > energy.params.idle_recharge_below_pct
+    assert idle.role is UAVRole.RETURNING
+    assert busy.role is UAVRole.IDLE                      # it could still be tasked: it waits airborne
 
 
 def test_battery_depletion_ends_the_mission_for_that_uav():

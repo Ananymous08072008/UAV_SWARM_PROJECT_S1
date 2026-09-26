@@ -11,6 +11,15 @@ choosing which UAVs fly them.
    predicted PDR >= ``min_planned_pdr`` (obstacles included). If a straight
    chain is blocked, dog-leg detours around the obstruction are tried.
 
+   Once the real terminals are placed, a few queued PoIs (lookahead, passed
+   in by the mission manager) get the same treatment - but only where they
+   piggyback cheaply on the backbone that already exists (at most
+   ``max_lookahead_relays`` extra hops). This lets a relay already be moving
+   toward where a surveyor is headed next, instead of only reacting once it
+   gets there. A real terminal always wins the fleet's relay UAVs first: the
+   lookahead chains are appended after every real one, and ``_assign`` fills
+   chains in that order.
+
 2. Assign (who flies each relay point)
    Chains are filled in priority order and only if the whole chain can be
    filled. A UAV already relaying near a point keeps it (stickiness), others
@@ -45,10 +54,14 @@ class RelayParams:
     reposition_threshold_m: float = 25.0
     min_battery_pct: float = 35.0
     replan_interval_s: float = 10.0
-    stickiness_s: float = 30.0
+    stickiness_s: float = 30.0            # bonus for keeping the relay that is already there
+    lookahead_pois: int = 3               # queued PoIs to plan a head start for, beyond the active ones
+    max_lookahead_relays: int = 3         # cap on extra relays spent pre-positioning for them
 
     def __post_init__(self) -> None:
         if not 0.5 <= self.min_planned_pdr < 1 or not 0 < self.spacing_safety <= 1:
+            raise ValueError("invalid relay planning parameters")
+        if self.lookahead_pois < 0 or self.max_lookahead_relays < 0:
             raise ValueError("invalid relay planning parameters")
 
 
@@ -66,6 +79,7 @@ class RelayChain:
     anchor: str                     # anchor key: "GCS", a terminal key, or "<terminal>/r<i>"
     depends_on: Optional[str]       # terminal whose chain this one hangs off (None = straight from the GCS)
     points: list[np.ndarray]
+    is_lookahead: bool = False      # a queued PoI, not a UAV actually surveying yet
 
 
 @dataclass
@@ -79,6 +93,7 @@ class RelayPlan:
 
     def to_dict(self) -> dict[str, Any]:
         return {"chains": [{"terminal": c.terminal, "priority": c.priority, "anchor": c.anchor,
+                            "is_lookahead": c.is_lookahead,
                             "points": [[round(float(v), 1) for v in p] for p in c.points]} for c in self.chains],
                 "unreachable": list(self.unreachable), "relay_count": self.relay_count}
 
@@ -95,6 +110,7 @@ class RelaySelector:
         self.assignment: dict[int, tuple[np.ndarray, str]] = {}   # uav_id -> (point, terminal)
         self.excluded: dict[int, str] = {}   # uav_id -> reason (not eligible as relay)
         self.leaving: set[int] = set()       # relays waiting for a replacement before RTH
+        self.skip: set[str] = set()          # PoIs surveyed disconnected by design (data ferry): no chain
         self._signature: Optional[tuple] = None
         self._last_plan_t = -math.inf
         self.replans = 0
@@ -106,13 +122,13 @@ class RelaySelector:
     def terminals(self, world: "World") -> list[Terminal]:
         out = []
         for uav in world.state.uavs_with_role(UAVRole.SURVEY):
-            if uav.assigned_poi is None or uav.target is None:
+            if uav.assigned_poi is None or uav.target is None or uav.assigned_poi in self.skip:
                 continue
             poi = world.state.pois.get(uav.assigned_poi)
             out.append(Terminal(poi.poi_id, uav.target.copy(), poi.priority))
         return out
 
-    def make_plan(self, terminals: Sequence[Terminal]) -> RelayPlan:
+    def make_plan(self, terminals: Sequence[Terminal], lookahead: Sequence[Terminal] = ()) -> RelayPlan:
         gcs = self.env.comm.gcs_antenna_position(self.world)
         anchors: list[tuple[str, np.ndarray, bool]] = [(GCS_KEY, gcs, True)]  # (key, point, is_gcs)
         plan = RelayPlan()
@@ -140,7 +156,37 @@ class RelaySelector:
                 anchors.append((f"{term.key}/r{i + 1}", p, False))
             anchors.append((term.key, term.point, False))
             remaining.remove(term)
+        self._extend_for_lookahead(plan, anchors, terminals, lookahead)
         return plan
+
+    def _extend_for_lookahead(self, plan: RelayPlan, anchors: list[tuple[str, np.ndarray, bool]],
+                              terminals: Sequence[Terminal], lookahead: Sequence[Terminal]) -> None:
+        """With the real backbone already grown, cheaply reach toward the next queued PoIs so a
+        relay can be moving that way before a surveyor is actually sent there. Only taken where
+        it piggybacks on the existing anchors for at most ``max_lookahead_relays`` extra hops -
+        real terminals always keep first claim on the fleet's relay UAVs (``_assign`` fills
+        chains in the order they appear here, and lookahead chains are appended last)."""
+        real_keys = {t.key for t in terminals}
+        for term in lookahead:
+            if term.key in real_keys:
+                continue
+            best: Optional[tuple] = None
+            for key, point, is_gcs in anchors:
+                path = self._hop_path(point, term.point, is_gcs)
+                if path is None:
+                    continue
+                length = float(np.linalg.norm(term.point[:2] - point[:2]))
+                candidate = (len(path), length, key, path)
+                if best is None or candidate[:2] < best[:2]:
+                    best = candidate
+            if best is None or best[0] > self.params.max_lookahead_relays:
+                continue  # too expensive to pre-position for; wait until it is a real terminal
+            _, _, anchor_key, path = best
+            depends_on = None if anchor_key == GCS_KEY else anchor_key.split("/")[0]
+            plan.chains.append(RelayChain(term.key, term.priority, anchor_key, depends_on, path, is_lookahead=True))
+            for i, p in enumerate(path):
+                anchors.append((f"{term.key}/r{i + 1}", p, False))
+            anchors.append((term.key, term.point, False))
 
     def count_relays(self, terminals: Sequence[Terminal]) -> Optional[int]:
         plan = self.make_plan(terminals)
@@ -202,17 +248,20 @@ class RelaySelector:
     def request_replan(self) -> None:
         self._signature = None
 
-    def update(self, world: "World", view: "NetworkView", force: bool = False) -> bool:
+    def update(self, world: "World", view: "NetworkView", lookahead: Sequence[Terminal] = (),
+              force: bool = False) -> bool:
         """Re-plan and re-assign relays when something relevant changed. Returns True if it ran.
 
         "Repair only what is broken": a new plan is made when the survey targets or the
         eligible UAVs change, when a fault forces it, or periodically - but only while a
         surveyor on station is actually cut off. Routing already works around many
         changes (e.g. a new obstacle) on its own; moving relays that still carry traffic
-        would break links while they fly.
+        would break links while they fly. ``lookahead`` (the next few queued PoIs) only
+        extends the plan opportunistically and never delays a re-plan on its own.
         """
         terminals = self.terminals(world)
         signature = (tuple(sorted((t.key, round(float(t.point[0])), round(float(t.point[1]))) for t in terminals)),
+                     tuple(sorted(t.key for t in lookahead)),
                      tuple(sorted(self.excluded)), tuple(sorted(self.leaving)))
         if self.static:
             if self._last_plan_t > -math.inf or not terminals:
@@ -222,7 +271,7 @@ class RelaySelector:
                 return False
         self._signature = signature
         self._last_plan_t = world.t
-        self.plan = self.make_plan(terminals)
+        self.plan = self.make_plan(terminals, lookahead)
         self._assign(world)
         self.replans += 1
         return True

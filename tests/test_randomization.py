@@ -12,7 +12,7 @@ from core.config import ConfigError, ScenarioConfig, TriggerSpec
 from core.events import EventType, Trigger, TriggerAction, TriggerSchedule
 from core.poi import PoIStatus
 from core.uav import UAVRole
-from core.world import CommandError
+from core.world import CommandError, _spatial_priorities
 from main import build_simulation, parse_args
 from simulation.obstacles import square
 from tests.helpers import make_sim, make_world, run_until, scenario
@@ -82,13 +82,18 @@ def test_a_fixed_count_draws_exactly_what_it_always_did():
     world = make_world(scenario={"seed": 11}, random_pois={"count": 3})
     cfg, area = world.scenario.random_pois, world.scenario.area
     rng = np.random.default_rng(11)
-    for i in range(1, 4):
+    positions = []
+    for _ in range(1, 4):
         x = rng.uniform(area.x_min_m + cfg.margin_m, area.x_max_m - cfg.margin_m)
         y = rng.uniform(area.y_min_m + cfg.margin_m, area.y_max_m - cfg.margin_m)
-        priority = int(rng.integers(cfg.priority[0], cfg.priority[1] + 1))
         rng.uniform(*cfg.survey_time_s)
+        positions.append((x, y))
+    gcs = world.state.gcs_position[:2]
+    priorities = _spatial_priorities(positions, gcs, cfg.cluster_radius_m)
+    for i, ((x, y), priority) in enumerate(zip(positions, priorities), start=1):
         poi = world.state.pois.get(f"POI-R{i}")
-        assert poi.position[:2] == pytest.approx((x, y)) and poi.priority == priority
+        assert poi.position[:2] == pytest.approx((x, y))
+        assert poi.priority == priority   # not drawn: derived from the final positions
 
 
 @pytest.mark.parametrize("random_pois, message", [

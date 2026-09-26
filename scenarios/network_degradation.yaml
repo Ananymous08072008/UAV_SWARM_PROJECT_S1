@@ -20,7 +20,7 @@ gcs:
 disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
 
 uavs:
-  count: 8                        # 2 surveyors + 5 relays (100 m radio range) + 1 spare
+  count: 9                        # 2 surveyors + 6 relays (100 m radio range) + 1 spare (fleet is 9-17)
   formation: grid
   per_row: 3
   spacing_m: 30.0                 # >= swarm.safety.min_separation_m, or neighbours collide on take-off
@@ -33,7 +33,7 @@ pois:
     priority: 3
     survey_time_s: 90.0
   - id: POI-B
-    position_m: [640.0, 380.0]
+    position_m: [700.0, 440.0]      # deep enough that 9 UAVs have one spare, not two to mask the fault
     priority: 4
     survey_time_s: 120.0
 

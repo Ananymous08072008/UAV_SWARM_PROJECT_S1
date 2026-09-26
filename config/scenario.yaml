@@ -40,7 +40,8 @@ disaster_zone: [[300, -50], [1200, -50], [1200, 1000], [250, 1000]]
 # instead fixes the fleet, e.g. for experiments that compare fleet sizes.
 uavs:
   count: auto
-  max_count: 40
+  min_count: 9                    # never fewer: shortfall flown as spares
+  max_count: 17
   formation: grid
   per_row: 6
   spacing_m: 30.0                 # >= swarm.safety.min_separation_m, or neighbours collide on take-off
@@ -48,15 +49,16 @@ uavs:
   initial_battery_pct: 100.0
   battery_overrides: {}
 
-# No fixed PoIs: every run draws how many there are, where, how urgent and how
-# long each takes to survey.
+# No fixed PoIs: every run draws how many there are, where and how long each
+# takes to survey. Priority follows from where they land (spatial clustering,
+# core/world.py) rather than being drawn too.
 pois: []
 
 random_pois:
   count: [4, 8]
   region_m: [300.0, -50.0, 1200.0, 1000.0]   # inside the disaster zone, away from the GCS
   min_spacing_m: 150.0                        # no two PoIs on top of each other
-  priority: [1, 5]
+  cluster_radius_m: 250.0                     # PoIs this close to one another count as the same cluster
   survey_time_s: [45.0, 90.0]
   margin_m: 20.0
 

@@ -18,14 +18,14 @@ from fastapi.testclient import TestClient
 import dashboard.mission as mission_module
 from core.config import ConfigError, RandomPoIConfig, TriggerSpec
 from dashboard.api import create_app
-from dashboard.mission import MAX_POIS, MAX_UAVS, build_scenario, limits, template
+from dashboard.mission import MAX_POIS, MAX_UAVS, MIN_UAVS, build_scenario, limits, template
 from dashboard.server import parse_args
 from dashboard.session import SessionError, SessionManager
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # A mission small and short enough that a test never waits on physics.
-SPEC = {"uav_count": 4, "duration_s": 60.0, "speed": 20.0,
+SPEC = {"uav_count": 9, "duration_s": 60.0, "speed": 20.0,
         "pois": [{"x_m": 400.0, "y_m": 200.0, "priority": 4, "survey_time_s": 20.0}]}
 
 
@@ -65,7 +65,7 @@ def test_the_fleet_is_sized_to_the_mission_unless_the_browser_fixes_it():
     assert build_scenario({}).uavs.auto                         # the template's default
     assert build_scenario({"uav_count": "auto"}).uavs.auto
     assert build_scenario({"uav_count": "AUTO "}).uavs.auto
-    assert build_scenario({"uav_count": 5}).uavs.count == 5
+    assert build_scenario({"uav_count": 12}).uavs.count == 12
     assert build_scenario({}).uavs.max_count <= MAX_UAVS        # the shared-server ceiling still holds
 
 
@@ -103,13 +103,21 @@ def test_each_mission_gets_its_own_seed_unless_one_is_given():
     assert build_scenario({"seed": 7}).seed == 7
 
 
-def test_builder_reflows_the_launch_grid_for_a_single_uav():
+def test_builder_reflows_the_launch_grid_for_the_smallest_fleet():
     # per_row must not exceed the count, or spawn positions collapse.
-    assert build_scenario({"uav_count": 1}).uavs.per_row == 1
+    assert build_scenario({"uav_count": MIN_UAVS}).uavs.per_row <= MIN_UAVS
+
+
+def test_every_mission_flies_9_to_17_uavs():
+    assert (MIN_UAVS, MAX_UAVS) == (9, 17)
+    auto = build_scenario({"uav_count": "auto"}).uavs
+    assert (auto.min_count, auto.max_count) == (MIN_UAVS, MAX_UAVS)
+    assert limits()["min_uavs"] == MIN_UAVS
 
 
 @pytest.mark.parametrize("spec, message", [
     ({"uav_count": MAX_UAVS + 1}, "uav_count"),
+    ({"uav_count": MIN_UAVS - 1}, "uav_count"),
     ({"uav_count": 0}, "uav_count"),
     ({"uav_count": "many"}, "whole number"),
     ({"duration_s": 99999}, "duration_s"),
@@ -165,13 +173,13 @@ def test_limits_describe_the_area_the_ui_must_clamp_to():
 
 # ---------------------------------------------------------------------- sessions
 def test_two_sessions_run_independent_worlds(manager):
-    a = manager.create({**SPEC, "uav_count": 3})
-    b = manager.create({**SPEC, "uav_count": 7, "mode": "baseline"})
+    a = manager.create({**SPEC, "uav_count": 9})
+    b = manager.create({**SPEC, "uav_count": 12, "mode": "baseline"})
     assert a.sim.world is not b.sim.world
     assert a.hub is not b.hub
     assert wait_until(lambda: a.sim.world.t > 1 and b.sim.world.t > 1)
-    assert len(a.sim.world.snapshot().uavs) == 3
-    assert len(b.sim.world.snapshot().uavs) == 7
+    assert len(a.sim.world.snapshot().uavs) == 9
+    assert len(b.sim.world.snapshot().uavs) == 12
     assert a.mode == "adaptive" and b.mode == "baseline"
 
 
@@ -190,10 +198,10 @@ def test_pausing_one_session_leaves_the_other_running(manager):
 def test_restart_rebuilds_the_world_and_bumps_the_generation(manager):
     session = manager.create(SPEC)
     assert wait_until(lambda: session.sim.world.t > 2)
-    session.restart({"uav_count": 6})
+    session.restart({"uav_count": 10})
     assert session.generation == 1
     assert wait_until(lambda: session.sim.world.t > 0.5)
-    assert len(session.sim.world.snapshot().uavs) == 6
+    assert len(session.sim.world.snapshot().uavs) == 10
 
 
 def test_restart_with_an_invalid_spec_is_rejected(manager):
@@ -239,7 +247,7 @@ def test_create_and_inspect_a_session_over_http(client):
     created = client.post("/api/sessions", json=SPEC)
     assert created.status_code == 201
     body = created.json()
-    assert body["uav_count"] == 4 and body["poi_count"] == 1
+    assert body["uav_count"] == 9 and body["poi_count"] == 1
 
     status = client.get(f"/api/sessions/{body['id']}")
     assert status.status_code == 200 and status.json()["state"] in ("running", "finished")

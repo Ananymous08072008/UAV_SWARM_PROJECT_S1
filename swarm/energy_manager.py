@@ -10,13 +10,19 @@ and land (+ reserve):
     on station (or ``max_handover_wait_s`` passes), then returns home
   * SURVEY that cannot finish its PoI      -> releases the PoI (progress kept)
     and returns home; the allocator re-tasks the PoI
-  * IDLE / BACKUP with low battery and nothing to do -> recharge proactively
+  * IDLE / BACKUP with low battery and *nothing it could still fly* -> recharge
+    proactively. One that could still take a pending PoI keeps flying instead
+    of pulling itself out of an active mission early.
+  * IDLE (no role at all) with nothing it could be given, at any battery level
+    (``park_when_idle``) -> land and top up on the pad rather than hover in place
+    burning battery while the next PoI waits for relays. It stays assignable
+    there. The one BACKUP parked near the network is left in the air.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
 from core.events import EventType, Severity
 from core.uav import UAV, UAVRole
@@ -36,6 +42,7 @@ class EnergyParams:
     max_handover_wait_s: float = 60.0
     idle_recharge_below_pct: float = 60.0
     idle_recharge_after_s: float = 20.0
+    park_when_idle: bool = True           # an IDLE UAV with nothing to do waits on the pad, not hovering
 
 
 class EnergyManager:
@@ -57,7 +64,7 @@ class EnergyManager:
         return max(self.env.battery.return_cost_pct(uav) + self.params.reserve_pct,
                    self.world.params.battery.critical_pct)
 
-    def update(self, world: "World") -> None:
+    def update(self, world: "World", has_pending_work: Optional[Callable[[UAV], bool]] = None) -> None:
         p, bat = self.params, self.env.battery
         for uav in world.state.operational_uavs():
             if uav.role in (UAVRole.RETURNING, UAVRole.CHARGING):
@@ -88,8 +95,11 @@ class EnergyManager:
                     self._go_home(uav, f"cannot finish {poi.poi_id} on this battery")
             elif uav.role in (UAVRole.IDLE, UAVRole.BACKUP):
                 since = self._idle_since.setdefault(uav.uav_id, world.t)
-                if uav.battery_pct < p.idle_recharge_below_pct and world.t - since >= p.idle_recharge_after_s:
-                    self._go_home(uav, "recharge while idle")
+                idle_long = world.t - since >= p.idle_recharge_after_s
+                low = uav.battery_pct < p.idle_recharge_below_pct
+                park = p.park_when_idle and uav.role is UAVRole.IDLE
+                if idle_long and (low or park) and (has_pending_work is None or not has_pending_work(uav)):
+                    self._go_home(uav, "recharge while idle" if low else "nothing to do: parking on the pad")
             if uav.role not in (UAVRole.IDLE, UAVRole.BACKUP):
                 self._idle_since.pop(uav.uav_id, None)
 

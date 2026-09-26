@@ -65,6 +65,59 @@ def _degraded_radio(world: "World") -> Optional[int]:
     return min(faulty, key=lambda u: (u.comm.radio_health, u.uav_id)).uav_id if faulty else None
 
 
+def _spatial_priorities(positions: list[tuple[float, float]], gcs_xy, cluster_radius_m: float) -> list[int]:
+    """Priority from geography, not chance, for the ``random_pois`` batch.
+
+    PoIs within ``cluster_radius_m`` of one another (single-link clustering via
+    union-find) are worth visiting as a group: the point most central to its
+    cluster (the head) gets top priority (5), its neighbours a priority that
+    tapers with distance from the GCS (closer = faster to add to the sweep = 4,
+    farther = batched with the rest of the cluster = 3). A PoI with no cluster
+    (an outlier) is worth less on its own - 3 if it is close enough to the GCS
+    for a quick look to be cheap, 2 in the middle distance, 1 far out.
+    Deterministic in the final positions, so it does not consume the run's RNG.
+    """
+    n = len(positions)
+    if n == 0:
+        return []
+    pts = np.asarray(positions, dtype=float)
+    gcs = np.asarray(gcs_xy, dtype=float)
+
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if float(np.hypot(*(pts[i] - pts[j]))) <= cluster_radius_m:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    clusters: dict[int, list[int]] = {}
+    for i in range(n):
+        clusters.setdefault(find(i), []).append(i)
+
+    dist_gcs = np.hypot(pts[:, 0] - gcs[0], pts[:, 1] - gcs[1])
+    near, far = np.percentile(dist_gcs, 25), np.percentile(dist_gcs, 75)
+
+    priority = [1] * n
+    for members in clusters.values():
+        if len(members) == 1:
+            i = members[0]
+            priority[i] = 3 if dist_gcs[i] <= near else (2 if dist_gcs[i] <= far else 1)
+            continue
+        centroid = pts[members].mean(axis=0)
+        head = min(members, key=lambda i: float(np.hypot(*(pts[i] - centroid))))
+        for i in members:
+            priority[i] = 5 if i == head else (4 if dist_gcs[i] <= near else 3)
+    return priority
+
+
 class World:
     def __init__(self, params: Parameters, scenario: ScenarioConfig) -> None:
         self.params = params
@@ -159,8 +212,8 @@ class World:
             raise CommandError("the scenario fixes the UAV count; spawn_fleet() is for uavs.count: auto")
         if self._started or self.state.uavs:
             raise CommandError("the fleet has already been spawned")
-        if not 1 <= count <= spawn.max_count:
-            raise CommandError(f"fleet size {count} outside 1..{spawn.max_count}")
+        if not spawn.min_count <= count <= spawn.max_count:
+            raise CommandError(f"fleet size {count} outside {spawn.min_count}..{spawn.max_count}")
         self._spawn_uavs(count)
         self.fleet = {"sizing": "auto", **dict(plan or {}), "uavs": count}
 
@@ -172,11 +225,17 @@ class World:
         # Only draw the count when it is a range, so a fixed count consumes exactly
         # the random numbers it always did and existing seeds reproduce unchanged.
         count = low if low == high else int(self.rng.integers(low, high + 1))
+        random_pois = []
         for i in range(1, count + 1):
             x, y = self._sample_poi_xy(self.rng)
-            priority = int(self.rng.integers(cfg.priority[0], cfg.priority[1] + 1))
             survey = float(self.rng.uniform(*cfg.survey_time_s))
-            self.state.pois.add(PoI(f"POI-R{i}", (x, y), priority, round(survey, 1)))
+            random_pois.append(self.state.pois.add(PoI(f"POI-R{i}", (x, y), 1, round(survey, 1))))
+        # Priority comes from where the PoIs ended up, not another random draw - see
+        # _spatial_priorities. It needs every position, so it runs once they are all placed.
+        positions = [(float(p.position[0]), float(p.position[1])) for p in random_pois]
+        priorities = _spatial_priorities(positions, self.state.gcs_position[:2], cfg.cluster_radius_m)
+        for poi, priority in zip(random_pois, priorities):
+            poi.priority = priority
 
     def _sample_poi_xy(self, rng: np.random.Generator) -> tuple[float, float]:
         """A spot in the random_pois region, min_spacing_m from every PoI and clear of obstacles.

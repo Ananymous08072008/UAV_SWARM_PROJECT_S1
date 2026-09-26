@@ -9,7 +9,11 @@ from tests.helpers import make_sim, run_until
 
 
 def test_radio_degradation_is_detected_and_the_relay_is_replaced():
-    sim = make_sim(scenario={"duration_s": 600.0})
+    # A single, long-running PoI: fault detection/recovery is orthogonal to which PoI is
+    # active, and a single PoI keeps the farthest-PoI deferral (TaskAllocator._defer_farthest,
+    # a no-op with only one PoI) from changing which UAV ends up in this scenario's shoes.
+    sim = make_sim(scenario={"duration_s": 600.0},
+                   pois=[{"id": "POI-A", "position_m": [420, 120], "priority": 4, "survey_time_s": 300}])
     run_until(sim, 70)
     relay = sim.manager.routes.critical_relay(sim.world)
     assert relay is not None, "the scenario needs a relay carrying traffic"

@@ -11,22 +11,25 @@ surveyors      the fewest that still finish every PoI before the mission
                it changes with every seed's PoI count, placement and survey times.
 relays         what keeps the first wave (the highest-priority PoIs) connected
                to the GCS, from the same plan the swarm flies later
-               (swarm/relay_selector.py), obstacles included. Later waves reuse
-               them or fall back to the data ferry, as the task allocator
-               decides. With ``relay_chain: false`` there are none: the
+               (swarm/relay_selector.py), obstacles included - and at least
+               the chain of the deepest single PoI, so every PoI can be flown
+               connected by itself. Later waves reuse them; the data ferry is
+               only the task allocator's last resort. With ``relay_chain: false`` there are none: the
                smallest fleet, but imagery only reaches the GCS when a
                surveyor flies back into range.
 spares         standby UAVs: the parked backup and a replacement for a relay
-               that has to hand over and fly home to recharge
+               that has to hand over and fly home to recharge - raised so the
+               fleet is never smaller than ``uavs.min_count``
 fault reserve  one per scheduled UAV loss, and one per scheduled new PoI whose
                position is not known in advance. A new PoI at a fixed position
                is planned exactly, like the PoIs present at launch.
 
-The result is capped at ``uavs.max_count``.
+The result is kept within ``uavs.min_count`` .. ``uavs.max_count``.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -126,18 +129,62 @@ def plan_fleet(world: "World", env: "Environment", relay: RelayParams, fleet: Fl
         first_wave = _priority_order(world, [j for j in jobs if j.release_s <= 0.0])[:surveyors]
         # The planner only reads the world's geometry and the radio model; it never
         # assigns a role, so it needs no RoleManager.
-        plan = RelaySelector(world, env, roles=None, params=relay).make_plan(
-            [Terminal(j.key, j.waypoint, j.priority) for j in first_wave])
+        selector = RelaySelector(world, env, roles=None, params=relay)
+        plan = selector.make_plan([Terminal(j.key, j.waypoint, j.priority) for j in first_wave])
         relays, unreachable = plan.relay_count, tuple(plan.unreachable)
-    return FleetPlan(surveyors=surveyors, relays=relays, spares=fleet.spares, fault_reserve=reserve,
+        # The deepest PoI sets a floor too: a fleet that cannot staff even one PoI's chain on
+        # its own can only ever ferry that PoI - it would never be surveyed connected.
+        deepest = max((selector.count_relays([Terminal(j.key, j.waypoint, j.priority)]) or 0 for j in jobs),
+                      default=0)
+        relays = max(relays, deepest)
+    # A fleet below uavs.min_count flies the shortfall as extra spares: later waves and
+    # relay handovers get UAVs to spare instead of waiting on a relay budget that is too tight.
+    # A long chain also needs rotation margin of its own: the farthest PoI is deferred until
+    # every other one is done (swarm/task_allocator.py, _defer_farthest), so the UAVs that crew
+    # its chain have typically already done other duty and are not all fresh off the pad - a
+    # chain sized with zero spare slack can lose several relays to recharge at once and collapse
+    # entirely (chains are filled all-or-nothing), right when the demo should show it best.
+    handover_margin = math.ceil(deepest / 3) if fleet.relay_chain else 0
+    spares = max(fleet.spares, world.scenario.uavs.min_count - (surveyors + relays + reserve), handover_margin)
+    return FleetPlan(surveyors=surveyors, relays=relays, spares=spares, fault_reserve=reserve,
                      max_count=world.scenario.uavs.max_count, makespan_s=makespan, time_budget_s=budget,
                      pois=len(jobs), unreachable=unreachable)
 
 
 def _priority_order(world: "World", jobs: list[_Job]) -> list[_Job]:
-    """Highest priority first; among equals, the closest to the GCS (cheapest to reach) first."""
+    """Highest priority first; within a release/priority band, a greedy nearest-neighbour
+    route (spatial clustering) instead of ranking each job by GCS distance on its own, so a
+    surveyor sweeps a cluster of nearby PoIs together instead of zig-zagging between them.
+
+    The one job farthest from the GCS among those known at launch is moved to the very end,
+    mirroring the task allocator's own deferral of the farthest PoI (swarm/task_allocator.py,
+    ``_defer_farthest``) - so the makespan and first-wave relay estimates this feeds match
+    what the swarm actually flies, instead of assuming it goes out with the first wave."""
     gcs = np.asarray(world.state.gcs_position[:2], dtype=float)
-    return sorted(jobs, key=lambda j: (j.release_s, -j.priority, float(np.hypot(*(j.waypoint[:2] - gcs))), j.key))
+    bands: dict[tuple[float, int], list[_Job]] = {}
+    for j in jobs:
+        bands.setdefault((j.release_s, j.priority), []).append(j)
+    ordered: list[_Job] = []
+    for band in sorted(bands, key=lambda b: (b[0], -b[1])):
+        ordered.extend(_nearest_neighbour_route(bands[band], gcs))
+    at_launch = [j for j in ordered if j.release_s <= 0.0]
+    if len(at_launch) > 1:
+        farthest = max(at_launch, key=lambda j: float(np.hypot(*(j.waypoint[:2] - gcs))))
+        ordered = [j for j in ordered if j.key != farthest.key] + [farthest]
+    return ordered
+
+
+def _nearest_neighbour_route(group: list[_Job], start_xy: np.ndarray) -> list[_Job]:
+    """Greedy nearest-neighbour chain from ``start_xy``; ties broken by key for determinism."""
+    remaining = sorted(group, key=lambda j: j.key)
+    route: list[_Job] = []
+    at = start_xy
+    while remaining:
+        nxt = min(remaining, key=lambda j: (float(np.hypot(*(j.waypoint[:2] - at))), j.key))
+        route.append(nxt)
+        remaining.remove(nxt)
+        at = nxt.waypoint[:2]
+    return route
 
 
 def _fewest_surveyors(world: "World", battery: "BatteryModel", jobs: list[_Job], budget_s: float,
@@ -158,8 +205,12 @@ def _makespan(world: "World", battery: "BatteryModel", jobs: list[_Job], k: int,
 
     Each job goes to the surveyor that would finish it first. A surveyor that
     could not fly the job and still get home above ``reserve_pct`` lands,
-    recharges to ``resume_pct`` and flies it from the pad. Returns when the
-    last surveyor is back on the ground.
+    recharges to ``resume_pct`` and flies it from the pad. The last job -
+    ``_priority_order`` puts the farthest PoI there - does not start until every
+    surveyor has finished all its other jobs, mirroring the task allocator's own
+    deferral of it (swarm/task_allocator.py, ``_defer_farthest``), so this estimate
+    matches what the swarm actually flies. Returns when the last surveyor is back
+    on the ground.
     """
     uav_p, bat_p = world.params.uav, world.params.battery
     spawn = world.scenario.uavs
@@ -178,20 +229,27 @@ def _makespan(world: "World", battery: "BatteryModel", jobs: list[_Job], k: int,
         return (battery.travel_cost_pct(pos, job.waypoint) + battery.hover_cost_pct(job.survey_s)
                 + battery.travel_cost_pct(job.waypoint, home_above) + battery.hover_cost_pct(descent_s))
 
-    fleet = [(0.0, pad, full) for _ in range(k)]            # (time, position, battery %) per surveyor
-    for job in jobs:
-        if job_cost(pad, job) + reserve_pct > bat_p.resume_pct:
-            continue                                        # out of range even on a fresh battery
+    def schedule(fleet: list, job: _Job, earliest_s: float) -> None:
         options = []
         for i, (t, pos, pct) in enumerate(fleet):
             if job_cost(pos, job) + reserve_pct > pct:      # recharge first
                 landed_pct = max(0.0, pct - home_cost(pos))
                 charge_s = max(0.0, bat_p.resume_pct - landed_pct) / bat_p.charge_rate_pct_per_min * 60.0
                 t, pos, pct = t + home_time(pos) + charge_s, pad, max(landed_pct, bat_p.resume_pct)
-            start = max(t, job.release_s)
+            start = max(t, job.release_s, earliest_s)
             done = start + battery.travel_time_s(pos, job.waypoint) + job.survey_s
             spent = battery.travel_cost_pct(pos, job.waypoint) + battery.hover_cost_pct(job.survey_s)
             options.append((done, i, job.waypoint, pct - spent))
         done, i, pos, pct = min(options, key=lambda o: (o[0], o[1]))
         fleet[i] = (done, pos, pct)
+
+    fleet = [(0.0, pad, full) for _ in range(k)]            # (time, position, battery %) per surveyor
+    regular, deferred = (jobs[:-1], jobs[-1]) if len(jobs) > 1 else (jobs, None)
+    for job in regular:
+        if job_cost(pad, job) + reserve_pct > bat_p.resume_pct:
+            continue                                        # out of range even on a fresh battery
+        schedule(fleet, job, 0.0)
+    if deferred is not None and job_cost(pad, deferred) + reserve_pct <= bat_p.resume_pct:
+        barrier = max(t for t, _, _ in fleet)   # every surveyor free before the farthest PoI starts
+        schedule(fleet, deferred, barrier)
     return max(t + home_time(pos) for t, pos, _ in fleet)

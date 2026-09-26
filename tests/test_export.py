@@ -25,7 +25,7 @@ from tests.helpers import make_sim, run_until
 
 SHEETS = ["Mission metrics", "Metrics over time", "Event log"]
 
-SPEC = {"uav_count": 4, "duration_s": 60.0, "speed": 20.0,
+SPEC = {"uav_count": 9, "duration_s": 60.0, "speed": 20.0,
         "pois": [{"x_m": 400.0, "y_m": 200.0, "priority": 4, "survey_time_s": 20.0}]}
 
 

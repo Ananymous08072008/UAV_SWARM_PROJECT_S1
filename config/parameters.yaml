@@ -96,7 +96,10 @@ swarm:
   allocation:
     reserve_pct: 10.0         # battery kept for the trip home
     battery_weight_s: 2.0     # seconds of travel that 1 % of battery is worth
-    ferry_wait_s: 240.0       # after this wait, survey even without a relay chain (store-and-forward)
+    relaxed_reserve_pct: 4.0  # fallback reserve when no UAV clears reserve_pct for a PoI
+    ferry_min_priority: 4     # priority >= this may ferry (store-and-forward) before the deadline crunch ...
+    ferry_min_blocked_s: 60.0    # ... once continuously blocked at least this long, not on one tight tick
+    ferry_deadline_margin_s: 600.0  # any blocked PoI may ferry once this little mission time is left
 
   relay:
     relay_altitude_m: 60.0
@@ -106,6 +109,8 @@ swarm:
     min_battery_pct: 35.0
     replan_interval_s: 10.0
     stickiness_s: 30.0        # bonus for keeping the relay that is already there
+    lookahead_pois: 3         # queued PoIs to plan a head start for, beyond the ones being surveyed now
+    max_lookahead_relays: 3   # cap on extra relays spent pre-positioning for them
 
   energy:
     reserve_pct: 8.0
@@ -114,6 +119,7 @@ swarm:
     max_handover_wait_s: 60.0
     idle_recharge_below_pct: 60.0
     idle_recharge_after_s: 20.0
+    park_when_idle: true      # IDLE with nothing to do -> land and top up instead of hovering still
 
   priority:
     ageing_per_min: 0.25      # waiting PoIs slowly gain priority (no starvation)

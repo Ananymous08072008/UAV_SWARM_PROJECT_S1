@@ -4,12 +4,17 @@
 # the fewest surveyors that can still finish every PoI before the deadline
 # (uavs.count: auto), so there are far more PoIs than surveyors and
 # the swarm has to decide which PoI to fly next:
+#   * priority comes from geography, not chance (core/world.py, _spatial_priorities):
+#     PoIs that cluster together are surveyed as a group - the most central point of
+#     a cluster is priority 5, its neighbours taper down with distance from the GCS;
+#     an isolated PoI is worth less unless it is close enough to the GCS for a quick
+#     look to be cheap (see random_pois.cluster_radius_m below);
 #   * PoIs are taken highest effective priority first (priority + ageing,
 #     swarm/priority_manager.py), so low-priority PoIs are delayed, not starved;
 #   * a surveyor that finishes one PoI is re-tasked to the next in the queue;
 #   * the urgent PoI injected mid-mission pre-empts a lower-priority surveyor.
-# PoI count, placement, priority and survey time are drawn from the seed, so
-# the fleet size changes every run. `python main.py --seed N` replays run N.
+# PoI count and placement are drawn from the seed (priority and survey time follow
+# from that), so the fleet size changes every run. `python main.py --seed N` replays run N.
 
 scenario:
   name: priority_based
@@ -33,7 +38,8 @@ disaster_zone: [[200, -150], [1000, -150], [1000, 800], [150, 800]]
 
 uavs:
   count: auto                     # fewest surveyors that finish in time (not one per PoI)
-  max_count: 20
+  min_count: 9                    # never fewer: shortfall flown as spares
+  max_count: 17
   formation: grid
   per_row: 5
   spacing_m: 30.0                 # >= swarm.safety.min_separation_m, or neighbours collide on take-off
@@ -47,7 +53,7 @@ random_pois:
   count: [8, 14]
   region_m: [200.0, -150.0, 1000.0, 800.0]
   min_spacing_m: 120.0
-  priority: [1, 5]
+  cluster_radius_m: 200.0    # PoIs this close to one another count as the same cluster
   survey_time_s: [40.0, 90.0]
   margin_m: 20.0
 

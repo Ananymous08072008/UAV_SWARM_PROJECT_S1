@@ -184,6 +184,7 @@ class MetricsCollector:
                 "relay_changes": self.counts.get(EventType.RELAY_ASSIGNED.value, 0),
                 "relay_handovers": self.manager.energy.handovers,
                 "replans": self.manager.relays.replans,
+                "data_ferry_assignments": self.manager.allocator.ferry_assignments,
             },
             "safety": {
                 "min_separation_m": round(safety.min_separation_observed_m, 2)

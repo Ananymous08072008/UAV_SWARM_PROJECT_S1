@@ -33,9 +33,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_SCENARIO = PROJECT_ROOT / "config" / "scenario.yaml"
 
 # Ceilings for a server that strangers can post to. A 60-UAV 2-hour mission is a
-# denial of service, not a research question.
-MAX_UAVS = 40
-MIN_UAVS = 1
+# denial of service, not a research question. Below 9 UAVs a relay-chained mission
+# stalls: the relay budget cannot cover the later PoIs and the fleet idles.
+MAX_UAVS = 17
+MIN_UAVS = 9
 MAX_POIS = 25
 MAX_DURATION_S = 3600.0
 MIN_DURATION_S = 10.0
@@ -70,7 +71,8 @@ def _float(spec: Mapping[str, Any], key: str, default: float) -> float:
 def _spawn(base: SpawnConfig, count: int | str) -> SpawnConfig:
     """Re-flow the launch grid so any UAV count keeps a sensible footprint."""
     if count == AUTO_COUNT:
-        return replace(base, count=AUTO_COUNT, max_count=min(base.max_count, MAX_UAVS))
+        return replace(base, count=AUTO_COUNT, min_count=max(base.min_count, MIN_UAVS),
+                       max_count=min(base.max_count, MAX_UAVS))
     per_row = min(count, max(1, base.per_row))
     return replace(base, count=count, per_row=per_row)
 

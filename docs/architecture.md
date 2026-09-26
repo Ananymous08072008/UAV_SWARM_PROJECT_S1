@@ -102,16 +102,29 @@ best one **and** is strictly closer to the GCS, which prevents both flapping and
 
 ### 3.3 Task allocation (sequential auction)
 
-For each pending PoI in effective-priority order (base priority + ageing bonus):
+One PoI is set aside before any of this runs: the one farthest from the GCS, identified once at
+mission start (adaptive mode only). It is held out of the auction until every other PoI is done, so
+when its turn comes the whole fleet is free to build its relay chain - naturally the longest in the
+mission - just for it: a multi-hop escort, not a lone data-ferry run.
+
+For each remaining pending PoI in effective-priority order (base priority + ageing bonus):
 feasible UAVs are IDLE/BACKUP with `battery >= fly + survey + return + reserve` and enough mission
-time left; the winner has the lowest bid `travel_time + w * battery_cost`. In adaptive mode the
-swarm also checks the **communication budget**: surveyors + the relays needed to connect them must
-fit in the fleet, otherwise the PoI waits. A PoI blocked for longer than `ferry_wait_s` is surveyed
-anyway and its imagery is ferried back (store-and-forward), which is why the fleet is never idle.
+time left (a slimmer, still-safe reserve is tried if no UAV clears the normal one, so a PoI is not
+left waiting when one UAV could still just about do it). The winner has the lowest bid
+`travel_time + w * battery_cost`. In adaptive mode the swarm also checks the **communication
+budget**: surveyors + the relays needed to connect them must fit in the fleet, otherwise the PoI
+waits for a relay path. Only once every PoI that fits the budget is tasked does a still-blocked PoI
+get a last look: with UAVs left that have nothing else to do, and either it is high priority and has
+stayed blocked for a while, or the mission deadline itself is close, it is surveyed disconnected and
+its imagery ferried back (store-and-forward) - a deliberately rare fallback, not a timeout, and the
+"deadline close" half of that or is what keeps a low-priority PoI a tight relay budget never reaches
+from being abandoned for the whole mission.
 
 ### 3.4 Relay placement
 
-Terminals are the survey waypoints. The tree grows from the GCS, each step attaching the terminal
+Terminals are the survey waypoints, plus the next few queued PoIs (lookahead) so the backbone can
+extend toward them ahead of time when that piggybacks on relays already in place. The tree grows
+from the GCS, each step attaching the terminal
 that needs the fewest relays (shortest-tree/Prim style), so chains share a backbone. Relays are
 spaced so every planned hop predicts `>= min_planned_pdr` including obstacle attenuation; if a
 straight chain is blocked, dog-leg detours (25/45/65 degrees) are tried. Chains are filled in

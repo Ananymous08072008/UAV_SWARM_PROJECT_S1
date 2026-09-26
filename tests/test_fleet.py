@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from core.config import Parameters, ScenarioConfig
+from core.config import ConfigError, Parameters, ScenarioConfig
 from core.events import EventType
 from simulation.runner import Simulation
 from tests.helpers import make_sim, parameters, run_until
@@ -43,10 +43,12 @@ def test_distant_pois_bring_the_relays_that_keep_them_connected():
 
 
 def test_the_relay_count_is_what_the_swarm_itself_plans():
-    # The planner must not guess: once every PoI is being surveyed, the swarm's
-    # own relay plan should need exactly the relays the fleet was sized for.
-    sim = make_sim(uavs=AUTO)
-    run_until(sim, 60)
+    # The planner must not guess: once the farthest PoI is being surveyed on its own
+    # (POI-A done, POI-B deferred until then - see TaskAllocator._defer_farthest), the
+    # swarm's own relay plan should need exactly the relays the fleet was sized for
+    # (the "deepest single PoI" floor in swarm/fleet_planner.py).
+    sim = make_sim(uavs=AUTO, scenario={"duration_s": 700.0})
+    run_until(sim, 150)
     assert sim.manager.relays.plan.relay_count == fleet(sim)["relays"]
 
 
@@ -70,6 +72,26 @@ def test_sizing_can_be_tuned_in_the_parameters():
     timeline = [{"at_s": 50, "action": "fail_uav", "params": {"uav_id": 1}}]
     f = fleet(make_sim(params=params, uavs=AUTO, pois=[NEAR], timeline=timeline))
     assert (f["spares"], f["fault_reserve"], f["uavs"]) == (3, 0, 4)
+
+
+def test_a_fleet_below_min_count_is_topped_up_with_spares():
+    sim = make_sim(uavs={"count": "auto", "min_count": 9, "max_count": 17}, pois=[NEAR])
+    f = fleet(sim)
+    assert f["uavs"] == len(sim.world.state.uavs) == 9
+    assert (f["surveyors"], f["relays"]) == (1, 0)
+    assert f["surveyors"] + f["relays"] + f["spares"] + f["fault_reserve"] == 9
+
+
+def test_relays_cover_the_deepest_poi_not_only_the_first_wave():
+    # One surveyor flies NEAR first; FAR comes later but still needs its whole chain.
+    sim = make_sim(uavs=AUTO, pois=[{**NEAR, "priority": 5}, FAR], scenario={"duration_s": 1800.0})
+    assert fleet(sim)["surveyors"] == 1
+    assert fleet(sim)["relays"] >= fleet(make_sim(uavs=AUTO, pois=[FAR]))["relays"] > 0
+
+
+def test_min_count_cannot_exceed_max_count():
+    with pytest.raises(ConfigError, match="min_count"):
+        make_sim(uavs={"count": "auto", "min_count": 10, "max_count": 9})
 
 
 def test_the_fleet_is_capped_and_says_so():
@@ -135,6 +157,7 @@ def test_the_demo_fleet_follows_its_random_pois(seed):
     sim = Simulation(Parameters.load(PROJECT_ROOT / "config" / "parameters.yaml"), scenario, results_dir=None)
     f = fleet(sim)
     assert f["sizing"] == "auto"
+    assert 9 <= f["uavs"] <= 17
     assert f["pois"] == len(sim.world.state.pois)
     assert 1 <= f["surveyors"] <= f["pois"] and f["over_budget"] is False
     assert len(sim.world.state.uavs) == f["uavs"]

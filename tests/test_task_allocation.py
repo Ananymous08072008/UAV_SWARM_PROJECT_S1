@@ -1,12 +1,16 @@
 """Stage 3 tests: communication- and energy-aware task allocation."""
 
+from core.events import EventType
 from core.poi import PoIStatus
 from core.uav import UAVRole
 from tests.helpers import make_sim, run_until
 
 
 def test_highest_priority_poi_is_served_first():
-    sim = make_sim()
+    """POI-B is the nearer of the two here, so the farthest-PoI deferral (POI-A) does not
+    interfere with the priority check this test is actually about."""
+    sim = make_sim(pois=[{"id": "POI-A", "position_m": [640, 380], "priority": 3, "survey_time_s": 60},
+                         {"id": "POI-B", "position_m": [420, 120], "priority": 4, "survey_time_s": 60}])
     sim.start()
     sim.tick()
     assigned = {p.poi_id: p.assigned_uav for p in sim.world.state.pois if p.assigned_uav}
@@ -35,9 +39,10 @@ def test_uav_without_the_battery_for_the_round_trip_is_not_used():
 
 
 def test_communication_budget_holds_back_surveys_a_small_fleet_cannot_support():
-    """Adaptive mode keeps enough UAVs for relays; baseline sends everyone out."""
-    adaptive = make_sim("adaptive", uavs={"count": 3, "per_row": 3})
-    baseline = make_sim("baseline", uavs={"count": 3, "per_row": 3})
+    """Adaptive mode keeps enough UAVs for relays; baseline sends everyone out.
+    (Deadline far off, so the last-resort data ferry is not in play.)"""
+    adaptive = make_sim("adaptive", uavs={"count": 3, "per_row": 3}, scenario={"duration_s": 1800.0})
+    baseline = make_sim("baseline", uavs={"count": 3, "per_row": 3}, scenario={"duration_s": 1800.0})
     for sim in (adaptive, baseline):
         sim.start()
         sim.tick()
@@ -46,15 +51,64 @@ def test_communication_budget_holds_back_surveys_a_small_fleet_cannot_support():
     assert surveying(baseline) == 2
 
 
-def test_blocked_poi_is_eventually_surveyed_by_data_ferrying():
-    sim = make_sim("adaptive", uavs={"count": 3, "per_row": 3},
-                   scenario={"duration_s": 900.0})
-    sim.manager.allocator.params = type(sim.manager.allocator.params)(
-        reserve_pct=10.0, battery_weight_s=2.0, ferry_wait_s=30.0)
-    run_until(sim, 200)
-    ferried = [e for e in sim.world.events.history() if "data ferry" in e.message]
-    assert ferried, "a long-blocked PoI should eventually be surveyed with store-and-forward"
-    assert sim.manager.allocator.ferrying or sim.world.state.pois.completed()
+def test_a_poi_the_fleet_can_never_connect_does_not_hold_the_others_back():
+    """3 UAVs: POI-A fits with its relays, POI-B needs more relays than the whole fleet has.
+    Waiting for POI-B's chain is futile, so POI-A must be flown (connected) first - not held
+    behind it - and POI-B ferried once UAVs are free, long before the deadline gate would open."""
+    sim = make_sim("adaptive", uavs={"count": 3, "per_row": 3}, scenario={"duration_s": 1800.0})
+    run_until(sim, 30)
+    assert sim.world.state.pois.get("POI-A").status is not PoIStatus.PENDING
+    assert sim.world.state.pois.get("POI-A").assigned_uav not in sim.manager.allocator.ferrying
+    assert sim.manager.allocator.ferry_assignments == 0, "no UAV is free yet: POI-B just waits"
+
+    run_until(sim, 400)
+    ferried = sim.world.events.history(types=[EventType.DATA_FERRY_ASSIGNED])
+    assert [e.poi_id for e in ferried] == ["POI-B"]
+    assert all(e.severity.value == "WARNING" for e in ferried)
+    assert ferried[0].t_s < sim.world.duration_s - sim.manager.allocator.params.ferry_deadline_margin_s
+
+
+def test_a_poi_that_only_waits_for_relays_is_flown_connected_not_ferried():
+    """BUSY (nearer) is tasked immediately. LATER is the farthest PoI in the mission, so it is
+    held back (TaskAllocator._defer_farthest) until BUSY is done, then flown with its own relay
+    chain once the fleet is free - not ferried."""
+    sim = make_sim("adaptive", uavs={"count": 6, "per_row": 3}, scenario={"duration_s": 1800.0},
+                   pois=[{"id": "BUSY", "position_m": [420, -150], "priority": 4, "survey_time_s": 400},
+                         {"id": "LATER", "position_m": [640, 380], "priority": 2, "survey_time_s": 30}])
+    run_until(sim, 300)
+    later = sim.world.state.pois.get("LATER")
+    assert later.status is PoIStatus.PENDING
+    run_until(sim, 600)
+    assert later.status is not PoIStatus.PENDING
+    assert sim.manager.allocator.ferry_assignments == 0
+    assert not sim.world.events.history(types=[EventType.DATA_FERRY_ASSIGNED])
+
+
+def test_farthest_poi_is_deferred_and_flown_with_a_multi_hop_relay_chain():
+    """FAR is the highest-priority PoI here but also the farthest, so it waits for the two
+    near PoIs to finish. Once tasked, it gets a relay chain of several UAVs - a multi-hop
+    escort - instead of the lone, disconnected data-ferry run it would otherwise need."""
+    sim = make_sim("adaptive", uavs={"count": 8, "per_row": 4}, scenario={"duration_s": 1800.0},
+                   pois=[{"id": "NEAR-1", "position_m": [150, 0], "priority": 3, "survey_time_s": 30},
+                         {"id": "NEAR-2", "position_m": [0, 150], "priority": 3, "survey_time_s": 30},
+                         {"id": "FAR", "position_m": [640, 380], "priority": 5, "survey_time_s": 30}])
+    sim.start()
+    sim.tick()
+    assert sim.manager.allocator.farthest_poi_id == "FAR"
+    far = sim.world.state.pois.get("FAR")
+    assert far.status is PoIStatus.PENDING            # held back despite the highest priority
+
+    run_until(sim, 100)
+    assert sim.world.state.pois.get("NEAR-1").is_completed
+    assert sim.world.state.pois.get("NEAR-2").is_completed
+    assert far.status is not PoIStatus.PENDING
+    assert far.assigned_uav not in sim.manager.allocator.ferrying
+    assert len(sim.world.state.uavs_with_role(UAVRole.RELAY)) >= 3
+
+    run_until(sim, 400)
+    assert far.is_completed
+    assert sim.manager.allocator.ferry_assignments == 0
+    assert not sim.world.events.history(types=[EventType.DATA_FERRY_ASSIGNED])
 
 
 def test_allocation_is_fast_enough_for_real_time():
