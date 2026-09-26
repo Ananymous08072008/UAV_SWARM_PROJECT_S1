@@ -40,7 +40,7 @@ TEMPLATE_SCENARIO = PROJECT_ROOT / "config" / "scenario.yaml"
 MAX_UAVS = 25
 MIN_UAVS = 9
 MAX_POIS = 25
-MAX_DURATION_S = 3600.0
+MAX_DURATION_S = 2700.0
 MIN_DURATION_S = 10.0
 
 _template: Optional[ScenarioConfig] = None
