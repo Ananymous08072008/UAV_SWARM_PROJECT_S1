@@ -111,6 +111,22 @@ def test_farthest_poi_is_deferred_and_flown_with_a_multi_hop_relay_chain():
     assert not sim.world.events.history(types=[EventType.DATA_FERRY_ASSIGNED])
 
 
+def test_the_farthest_poi_stops_waiting_once_the_deadline_draws_near():
+    """FAR waits for SLOW - but not past the point where there would be too little time left
+    to fly it (``defer_deadline_margin_s``): a nearer survey that drags on must not cost the
+    farthest PoI its own."""
+    sim = make_sim("adaptive", uavs={"count": 8, "per_row": 4}, scenario={"duration_s": 1000.0},
+                   pois=[{"id": "SLOW", "position_m": [150, 0], "priority": 3, "survey_time_s": 600},
+                         {"id": "FAR", "position_m": [640, 380], "priority": 3, "survey_time_s": 30}])
+    slow, far = (sim.world.state.pois.get(p) for p in ("SLOW", "FAR"))
+    run_until(sim, 300)
+    assert slow.status is PoIStatus.IN_PROGRESS and far.status is PoIStatus.PENDING   # waiting its turn
+    run_until(sim, 560)
+    assert not slow.is_completed and far.status is not PoIStatus.PENDING             # the deadline decides
+    run_until(sim, 1000)
+    assert slow.is_completed and far.is_completed
+
+
 def test_allocation_is_fast_enough_for_real_time():
     sim = make_sim()
     run_until(sim, 60)

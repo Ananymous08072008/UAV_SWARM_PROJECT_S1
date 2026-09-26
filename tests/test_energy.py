@@ -1,10 +1,18 @@
 """Stage 5 tests: energy estimates, return-to-home, recharging and relay handover."""
 
+import numpy as np
+
 from core.config import Parameters
 from core.events import EventType
+from core.poi import PoIStatus
 from core.uav import UAV, UAVRole
 from simulation.battery import BatteryModel
-from tests.helpers import make_sim, run_until, step_world
+from tests.helpers import make_sim, parameters, run_until, step_world
+
+# The mission constraints' rule: home at 20 % - earlier only if the trip needs more - and no other early return.
+RTH_AT_20 = parameters(battery={"critical_pct": 20.0},
+                       swarm={"energy": {"idle_recharge_below_pct": 0.0, "park_when_idle": False,
+                                         "leave_unfinishable_survey": False}})
 
 
 def test_estimates_grow_with_distance_and_hover_time():
@@ -92,6 +100,80 @@ def test_an_idle_uav_with_nothing_to_do_parks_instead_of_hovering():
     assert idle.battery_pct > energy.params.idle_recharge_below_pct
     assert idle.role is UAVRole.RETURNING
     assert busy.role is UAVRole.IDLE                      # it could still be tasked: it waits airborne
+
+
+def test_the_return_level_is_the_threshold_unless_the_trip_home_needs_more():
+    sim = make_sim(params=parameters(battery={"critical_pct": 20.0}, uav={"cruise_speed_mps": 5.0}))
+    energy, uav = sim.manager.energy, sim.world.state.get_uav(1)
+    assert energy.needed_at(uav, np.array([100.0, 0.0, 60.0])) == 20.0     # close in: exactly 20 %
+    assert energy.needed_at(uav, np.array([850.0, 600.0, 60.0])) > 30.0    # 1 km out at 5 m/s: what the trip takes
+
+
+def test_an_idle_uav_stays_available_until_the_threshold():
+    sim = make_sim(params=RTH_AT_20)
+    run_until(sim, 40)
+    idle = next(u for u in sim.world.state.uavs.values() if u.is_airborne)
+    sim.world.release_uav(idle.uav_id, "test")
+    idle.battery_pct = 50.0                                  # below the default 60 % idle-recharge line
+    energy = sim.manager.energy
+    energy.update(sim.world, lambda u: False)
+    step_world(sim.world, sim.world.t + energy.params.idle_recharge_after_s + 1)
+    energy.update(sim.world, lambda u: False)
+    assert idle.role is UAVRole.IDLE and idle.is_airborne    # no parking, no early recharge
+
+
+def test_an_idle_uav_waits_airborne_over_its_own_pad():
+    """With nothing to do it comes back to stand by over the operational center - still flying and
+    taskable, not landed - instead of hovering out in the field."""
+    params = parameters(swarm={"idle_standby_after_s": 20.0,
+                               "energy": {"park_when_idle": False, "idle_recharge_below_pct": 0.0}})
+    sim = make_sim(params=params, scenario={"duration_s": 900.0},
+                   pois=[{"id": "ONE", "position_m": [300, 0], "priority": 3, "survey_time_s": 10}],
+                   random_pois={"count": 1, "region_m": [150, -100, 300, 100], "spawn_s": [600.0, 600.0]})
+    run_until(sim, 250)
+    assert sim.world.state.pois.get("ONE").is_completed
+    uav = sim.world.state.get_uav(sim.world.state.pois.get("ONE").completed_by)
+    assert uav.role is UAVRole.IDLE and uav.is_airborne
+    assert uav.horizontal_distance_to(uav.home) < 3.0
+    assert uav.position[2] <= sim.manager.safety.levels[0] + 1.0          # low, under the transit levels
+
+
+def test_an_idle_uav_comes_in_above_the_waiting_ones_and_down_its_own_column():
+    """The others wait at the standby level over pads 30 m apart - no gap to fly through - so
+    a UAV heading for its pad stays above that level until it is over its own."""
+    params = parameters(swarm={"idle_standby_after_s": 20.0,
+                               "energy": {"park_when_idle": False, "idle_recharge_below_pct": 0.0}})
+    sim = make_sim(params=params, scenario={"duration_s": 900.0},
+                   pois=[{"id": "ONE", "position_m": [300, 0], "priority": 3, "survey_time_s": 10}],
+                   random_pois={"count": 1, "region_m": [150, -100, 300, 100], "spawn_s": [600.0, 600.0]})
+    levels = sim.manager.safety.levels
+    lowest_on_the_way: dict[int, float] = {}
+    while sim.world.t < 250.0:
+        sim.tick()
+        for u in sim.world.state.uavs.values():
+            homing = (u.role is UAVRole.IDLE and u.target is not None
+                      and float(np.hypot(*(u.target[:2] - u.home[:2]))) < 1.0)
+            if homing and u.horizontal_distance_to(u.home) > 3.0:
+                lowest_on_the_way[u.uav_id] = min(lowest_on_the_way.get(u.uav_id, 1e9), float(u.position[2]))
+    uav = sim.world.state.get_uav(sim.world.state.pois.get("ONE").completed_by)
+    assert lowest_on_the_way[uav.uav_id] >= levels[1] - 1.0
+    assert uav.horizontal_distance_to(uav.home) < 3.0 and uav.position[2] <= levels[0] + 1.0
+
+
+def test_a_surveyor_short_of_battery_keeps_surveying_until_the_threshold():
+    sim = make_sim(params=RTH_AT_20, uavs={"count": 1, "per_row": 1}, scenario={"duration_s": 1800.0},
+                   pois=[{"id": "LONG", "position_m": [200, 0], "priority": 5, "survey_time_s": 300}])
+    run_until(sim, 60)
+    uav, poi = sim.world.state.get_uav(1), sim.world.state.pois.get("LONG")
+    assert poi.status is PoIStatus.IN_PROGRESS
+    sim.world.set_battery(uav.uav_id, 30.0, "test")         # nowhere near enough to finish
+    run_until(sim, 90)
+    assert uav.role is UAVRole.SURVEY                         # by default it would already be heading home
+    while uav.role is UAVRole.SURVEY and sim.world.t < 400:
+        sim.tick()
+    assert uav.role is UAVRole.RETURNING
+    assert 19.0 <= uav.battery_pct <= 21.0                    # it left at the threshold, not before
+    assert poi.progress_s > 60 and poi.status is PoIStatus.PENDING     # and the survey so far is kept
 
 
 def test_battery_depletion_ends_the_mission_for_that_uav():

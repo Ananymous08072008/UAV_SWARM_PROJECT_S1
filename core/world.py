@@ -7,7 +7,8 @@ The World owns the authoritative WorldState and advances it in fixed steps.
                                                +--> EventBus --> dashboard / logger / metrics
 
 Each step:
-  1. fire scenario triggers that are due     (timeline or dashboard injections)
+  1. fire scenario triggers that are due     (timeline or dashboard injections),
+     and let PoIs whose spawn time has come appear
   2. advance every UAV by dt                 (motion + battery)
   3. return-to-home phases and charging      (land on the home pad, recharge)
   4. accumulate survey time on PoIs          (and release UAVs whose PoI is done)
@@ -21,7 +22,7 @@ from __future__ import annotations
 import math
 from dataclasses import fields as dc_fields
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -53,6 +54,7 @@ _RETRY_GRACE_S = 30.0   # ... for up to this long after its window closes (e.g. 
 # them apart means editing the timeline cannot move the PoIs, and vice versa.
 _STREAM_TIMELINE = 202
 _STREAM_TRIGGER_CHOICES = 203
+_STREAM_POI_SPAWN = 204
 
 
 class CommandError(ValueError):
@@ -157,12 +159,20 @@ class World:
         self._point_selectors: dict[str, PointSelector] = {}
         self._placement_filters: list[PlacementFilter] = []
         self._landing: set[int] = set()  # RETURNING UAVs that reached home altitude and are descending
+        self._awaiting_landing: set[int] = set()  # RETURNING UAVs over their pad, descent not cleared yet
+        # The swarm layer's say on when a descent may start (None: as soon as the UAV is over its pad).
+        self.landing_clearance: Optional[Callable[[UAV], bool]] = None
         self._started = False
         self._stopped = False
         # How the fleet size was decided, published with SIM_STARTED. With
         # ``uavs.count: auto`` the World waits for spawn_fleet(): sizing needs the
         # radio model and relay planner, which sit above the core layer.
         self.fleet: dict[str, Any] = {"sizing": "fixed"}
+        # PoIs drawn for this run that have not appeared yet (random_pois.spawn_s), by spawn time.
+        self._scheduled_pois: list[PoI] = []
+        # The mission's own PoIs (scenario + random batch, appeared or not). A region reported
+        # later through add_poi is not one of them.
+        self.planned_poi_ids: frozenset[str] = frozenset()
         self._create_pois()
         if not scenario.uavs.auto:
             self._spawn_uavs(scenario.uavs.count)
@@ -191,6 +201,17 @@ class World:
     @property
     def pending_triggers(self) -> int:
         return self._triggers.remaining
+
+    @property
+    def pending_spawns(self) -> int:
+        """PoIs of this run that have not appeared yet."""
+        return len(self._scheduled_pois)
+
+    @property
+    def scheduled_pois(self) -> tuple[PoI, ...]:
+        """The PoIs still to appear, earliest first (``created_at_s`` is when). For planning only:
+        the swarm itself must not act on a PoI before it appears."""
+        return tuple(self._scheduled_pois)
 
     @property
     def is_finished(self) -> bool:
@@ -225,28 +246,42 @@ class World:
         # Only draw the count when it is a range, so a fixed count consumes exactly
         # the random numbers it always did and existing seeds reproduce unchanged.
         count = low if low == high else int(self.rng.integers(low, high + 1))
-        random_pois = []
+        random_pois: list[PoI] = []
         for i in range(1, count + 1):
-            x, y = self._sample_poi_xy(self.rng)
+            x, y = self._sample_poi_xy(self.rng, also_avoid=random_pois)
             survey = float(self.rng.uniform(*cfg.survey_time_s))
-            random_pois.append(self.state.pois.add(PoI(f"POI-R{i}", (x, y), 1, round(survey, 1))))
+            random_pois.append(PoI(f"POI-R{i}", (x, y), 1, round(survey, 1)))
         # Priority comes from where the PoIs ended up, not another random draw - see
         # _spatial_priorities. It needs every position, so it runs once they are all placed.
         positions = [(float(p.position[0]), float(p.position[1])) for p in random_pois]
         priorities = _spatial_priorities(positions, self.state.gcs_position[:2], cfg.cluster_radius_m)
         for poi, priority in zip(random_pois, priorities):
             poi.priority = priority
+        self.planned_poi_ids = frozenset([spec.id for spec in self.scenario.pois]
+                                         + [p.poi_id for p in random_pois])
+        if cfg.spawn_s is None:
+            for poi in random_pois:
+                self.state.pois.add(poi)
+            return
+        # Spawn times come from a stream of their own, so turning them on leaves every
+        # position and survey time of a seed exactly where it was.
+        spawn_rng = np.random.default_rng([self.seed, _STREAM_POI_SPAWN])
+        for poi in random_pois:
+            poi.created_at_s = round(float(spawn_rng.uniform(*cfg.spawn_s)), 1)
+        self._scheduled_pois = sorted(random_pois, key=lambda p: (p.created_at_s, p.poi_id))
 
-    def _sample_poi_xy(self, rng: np.random.Generator) -> tuple[float, float]:
+    def _sample_poi_xy(self, rng: np.random.Generator, also_avoid: Sequence[PoI] = ()) -> tuple[float, float]:
         """A spot in the random_pois region, min_spacing_m from every PoI and clear of obstacles.
 
-        Rejection sampling. When the region is too crowded for the spacing, the
-        most spread-out candidate wins rather than failing the whole run; only a
-        region with no free ground at all (every candidate blocked) is an error.
+        Every PoI means the ones out there now, those still due to appear and
+        ``also_avoid``. Rejection sampling. When the region is too crowded for the
+        spacing, the most spread-out candidate wins rather than failing the whole
+        run; only a region with no free ground at all (every candidate blocked) is an error.
         """
         cfg = self.scenario.random_pois
         x0, y0, x1, y1 = cfg.bounds(self.state.area)
-        placed = [(float(p.position[0]), float(p.position[1])) for p in self.state.pois]
+        placed = [(float(p.position[0]), float(p.position[1]))
+                  for p in (*self.state.pois, *self._scheduled_pois, *also_avoid)]
         best, best_gap = None, -1.0
         for _ in range(_PLACEMENT_TRIES):
             x, y = float(rng.uniform(x0, x1)), float(rng.uniform(y0, y1))
@@ -271,10 +306,12 @@ class World:
                                "run it through simulation.runner.Simulation, which sizes the fleet")
         self._started = True
         st = self.state
+        later = f" (+{self.pending_spawns} appearing at random times)" if self.pending_spawns else ""
         self.publish(EventType.SIM_STARTED,
                      f"Scenario '{self.scenario.name}' started: {len(st.uavs)} UAVs, "
-                     f"{len(st.pois)} PoIs, seed {self.seed}, duration {self.duration_s:.0f}s",
+                     f"{len(st.pois)} PoIs{later}, seed {self.seed}, duration {self.duration_s:.0f}s",
                      data={"scenario": self.scenario.name, "seed": self.seed, "fleet": dict(self.fleet),
+                           "scheduled_pois": self.pending_spawns,
                            "timeline": [{"at_s": t.at_s, "action": t.action} for t in
                                         sorted(self.timeline, key=lambda t: t.at_s)]})
         if self.fleet["sizing"] == "auto":
@@ -310,6 +347,7 @@ class World:
             raise RuntimeError("World has been stopped")
         self.start()
         self._fire_due_triggers()
+        self._spawn_due_pois()
 
         st, dt = self.state, self.dt
         st.tick += 1
@@ -328,6 +366,7 @@ class World:
             if report.battery_depleted:
                 self.fail_uav(uav.uav_id, "battery depleted")
 
+        self._retry_landings()
         self._charge(dt)
         self._update_surveys(dt)
 
@@ -443,6 +482,7 @@ class World:
             return
         alt = self._check_altitude(altitude_m if altitude_m is not None else self.params.uav.rth_altitude_m)
         self._landing.discard(uav_id)
+        self._awaiting_landing.discard(uav_id)
         uav.goto((home[0], home[1], alt))
         distance = uav.horizontal_distance_to(home)
         self.publish(EventType.RTH_STARTED,
@@ -461,6 +501,7 @@ class World:
         role_before = uav.role
         uav.mark_failed()
         self._landing.discard(uav_id)
+        self._awaiting_landing.discard(uav_id)
         self.publish(EventType.UAV_FAILED, f"{uav.name} FAILED: {reason} (was {role_before.value})",
                      severity=Severity.CRITICAL, uav_id=uav_id,
                      data={"reason": reason, "role_before": role_before.value, "battery_pct": uav.battery_pct})
@@ -487,13 +528,21 @@ class World:
             poi = PoI(poi_id, xy[:2], int(priority), float(survey_time_s), altitude_m, created_at_s=self.t)
         except ValueError as exc:
             raise CommandError(str(exc)) from None
+        self._appear(poi, reason)
+        return poi
+
+    def _appear(self, poi: PoI, reason: str) -> None:
         self.state.pois.add(poi)
+        x, y = poi.position[:2]
         self.publish(EventType.POI_ADDED,
-                     f"NEW {poi_id} at ({xy[0]:.0f}, {xy[1]:.0f}) priority {poi.priority}, "
+                     f"NEW {poi.poi_id} at ({x:.0f}, {y:.0f}) priority {poi.priority}, "
                      f"survey {poi.survey_time_s:.0f}s" + (f" [{reason}]" if reason else ""),
                      severity=Severity.WARNING if poi.priority >= 4 else Severity.INFO,
-                     poi_id=poi_id, data={"priority": poi.priority, "reason": reason})
-        return poi
+                     poi_id=poi.poi_id, data={"priority": poi.priority, "reason": reason})
+
+    def _spawn_due_pois(self) -> None:
+        while self._scheduled_pois and self._scheduled_pois[0].created_at_s <= self.t + 1e-9:
+            self._appear(self._scheduled_pois.pop(0), "spawned")
 
     def set_radio_health(self, uav_id: int, quality: float, reason: str = "") -> None:
         """Inject (or clear) a radio fault: every link of this UAV is scaled by ``quality``."""
@@ -666,11 +715,31 @@ class World:
                      severity=Severity.WARNING, uav_id=uav.uav_id, poi_id=poi.poi_id,
                      data={"progress_ratio": round(poi.progress_ratio, 3), "reason": reason})
 
+    def _begin_descent(self, uav: UAV) -> None:
+        """Over the home pad: land, once the swarm layer's landing clearance (if any) allows it.
+        Until then the UAV holds at its level over the pad and is asked again every step."""
+        if self.landing_clearance is not None and not self.landing_clearance(uav):
+            if uav.uav_id not in self._awaiting_landing:
+                self._awaiting_landing.add(uav.uav_id)
+                self.publish(EventType.UAV_COMMANDED, f"{uav.name} holding over its pad: landing column not clear",
+                             uav_id=uav.uav_id, data={"reason": "landing column not clear"})
+            return
+        self._awaiting_landing.discard(uav.uav_id)
+        self._landing.add(uav.uav_id)
+        uav.goto((uav.home[0], uav.home[1], 0.0))
+
+    def _retry_landings(self) -> None:
+        for uav_id in sorted(self._awaiting_landing):
+            uav = self.state.uavs[uav_id]
+            if not uav.is_operational or uav.role is not UAVRole.RETURNING:
+                self._awaiting_landing.discard(uav_id)
+            elif uav.horizontal_distance_to(uav.home) <= self.params.uav.arrival_radius_m:
+                self._begin_descent(uav)
+
     def _on_arrived(self, uav: UAV) -> None:
         if uav.role is UAVRole.RETURNING:
             if uav.uav_id not in self._landing:  # above the home pad -> descend
-                self._landing.add(uav.uav_id)
-                uav.goto((uav.home[0], uav.home[1], 0.0))
+                self._begin_descent(uav)
             else:                                # touchdown
                 self._landing.discard(uav.uav_id)
                 self.publish(EventType.UAV_LANDED, f"{uav.name} landed at home ({uav.battery_pct:.1f}%)",

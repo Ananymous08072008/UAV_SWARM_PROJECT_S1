@@ -79,7 +79,7 @@ def test_uav_selectors_and_injection():
 def test_real_config_files_load():
     world = World.from_files("config/parameters.yaml", "config/scenario.yaml")
     low, high = world.scenario.random_pois.count
-    assert low <= len(world.state.pois) <= high
+    assert low <= len(world.state.pois) + world.pending_spawns <= high     # most appear only later
     # count: auto - the World waits for the fleet planner rather than guessing.
     assert world.scenario.uavs.auto and not world.state.uavs
 

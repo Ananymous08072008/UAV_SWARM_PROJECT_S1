@@ -1,5 +1,6 @@
 """Stage 7 tests: safety (flight levels, separation, geofence, obstacles, deadline) and imagery delivery."""
 
+import numpy as np
 import pytest
 
 from core.config import BatteryParams, ConfigError, UAVParams
@@ -158,6 +159,18 @@ def test_live_delivery_when_the_route_exists_from_the_start():
     assert stats["live_ratio"] > 0.95 and stats["mean_delay_s"] < 2.0
 
 
+def test_link_layer_retries_let_a_long_relay_chain_keep_up_with_the_camera():
+    """13 hops of 90 % links: charged per hop (ETX) the chain carries ~2.8 Mbit/s, close to the
+    3 Mbit/s camera; the product of 13 hop PDRs alone would leave ~0.8 Mbit/s and imagery minutes late."""
+    world = surveying_world()
+    world.update_comm(1, connected=True, hop_count=13, pdr=0.9 ** 13, etx=13 / 0.9)
+    data = DataModel(DataParams())
+    for _ in range(600):
+        world.step()
+        data.update(world, world.dt)
+    assert data.stats()["max_delay_s"] < DataParams().live_delay_s
+
+
 def test_landing_downloads_the_buffer_and_a_crash_loses_it():
     world = surveying_world()
     data = DataModel(DataParams())
@@ -237,6 +250,96 @@ def test_crossing_traffic_never_comes_within_20_m():
     assert safety.min_separation_observed_m >= 20.0
     for uav_id, (x, y) in enumerate(starts, start=1):
         assert world.state.get_uav(uav_id).horizontal_distance_to((600.0 - x, 600.0 - y)) < 3.0
+
+
+def test_stopping_dead_just_after_lift_off_holds_above_the_pad_then_climbs_on():
+    """Stopped dead at ground height, a UAV that had only just lifted off read as touching down:
+    it was never released and hovered on its pad for the rest of its battery, PoI in hand."""
+    sim = make_sim()
+    world, safety = sim.world, sim.manager.safety
+    uav = world.state.get_uav(1)
+    world.goto(1, (300.0, 0.0, 40.0))
+    while not uav.is_airborne:
+        world.step()
+    safety.avoid()
+    k = safety._uavs.index(uav)
+    level, brake = safety._options(k)[-1]                 # the last resort: stop dead
+    assert brake and level >= 0.5
+    safety._apply(k, level, brake, "collision avoidance")
+    left_the_pad_low = False
+    for _ in range(int(100 / world.dt)):                  # nothing in the way any more
+        safety.monitor()
+        safety.avoid()
+        world.step()
+        left_the_pad_low |= uav.position[2] < 39.0 and uav.horizontal_distance_to(uav.home) > 1.0
+    assert not uav.braking and uav.horizontal_distance_to((300.0, 0.0)) < 3.0
+    assert not left_the_pad_low                           # still a take-off: climbed before flying on
+
+
+def test_a_uav_waiting_over_its_pad_lands_from_there_without_climbing_first():
+    sim = make_sim()
+    world = sim.world
+    uav = world.state.get_uav(1)
+    airborne_at(world, 1, (uav.home[0], uav.home[1], 20.0))
+    world.goto(1, (uav.home[0], uav.home[1], 20.0))
+    sim.manager.roles.return_home(uav, "battery reserve reached")
+    top = 0.0
+    for _ in range(int(30 / world.dt)):
+        world.step()
+        top = max(top, float(uav.position[2]))
+    assert [e.uav_id for e in world.events.history(types=[EventType.UAV_LANDED])] == [1]
+    assert top <= 20.5                                      # straight down, not up to 80 m and back
+
+
+def test_a_landing_waits_until_nobody_is_under_its_descent():
+    """A descent crosses every level below and never gives way, so it only starts once the
+    column under the UAV is clear; until then the UAV holds at its level over the pad."""
+    sim = make_sim()
+    world, safety = sim.world, sim.manager.safety
+    lander = world.state.get_uav(1)
+    x, y = float(lander.home[0]), float(lander.home[1])
+    airborne_at(world, 1, (x, y, 60.0))
+    world.goto(1, (x, y, 60.0))
+    airborne_at(world, 2, (x + 10.0, y, 20.0))             # hovering right beside the landing column
+    world.goto(2, (x + 10.0, y, 20.0))
+    sim.manager.roles.return_home(lander, "mission complete")
+    fly(sim, 20)
+    assert lander.role is UAVRole.RETURNING and lander.position[2] > 55.0
+    assert not world.events.history(types=[EventType.UAV_LANDED])
+    world.goto(2, (x + 300.0, y, 20.0))                    # out of the way
+    fly(sim, 60)
+    assert [e.uav_id for e in world.events.history(types=[EventType.UAV_LANDED])] == [1]
+    assert safety.collisions == 0
+
+
+def test_a_climbing_uav_sent_down_is_predicted_to_carry_on_up_first():
+    """Momentum is in the prediction: without it, a UAV descending onto one that was still
+    climbing looked to stay exactly one level (20 m) clear - and they collided."""
+    sim = make_sim()
+    uav = sim.world.state.get_uav(1)
+    airborne_at(sim.world, 1, (100.0, 100.0, 50.0))
+    uav.velocity[2] = 3.0                                   # climbing at full rate ...
+    z = sim.manager.safety._vertical(uav, 20.0)             # ... when sent down to 20 m
+    assert z[1] > 50.0 and z.max() > 51.0                   # it keeps going up for a moment
+    assert z[-1] < 50.0                                     # then comes down
+
+
+def test_auto_placed_debris_never_buries_the_ground_station():
+    """With a short radio range the GCS antenna inside debris would cut it off in every direction."""
+    sim = make_sim()
+    sim.world.register_point_selector("beside_gcs", lambda w: np.array([30.0, 0.0]))
+    sim.world.inject("add_obstacle", {"id": "D", "center_m": "beside_gcs", "size_m": 140.0,
+                                      "height_m": 70.0, "attenuation_db": 40.0})
+    obstacle = next(iter(sim.env.obstacles))
+    gcs = sim.world.state.gcs_position
+    assert not obstacle.contains_xy(gcs[0], gcs[1])
+
+
+def test_debris_is_never_aimed_at_a_hop_touching_the_ground_station():
+    sim = make_sim()
+    run_until(sim, 5)             # just airborne beside the pads: every route is a single hop to the GCS
+    assert all(len(r.path) == 2 for r in sim.manager.routes.routes.values())
+    assert sim.manager.routes.backbone_midpoint(sim.env.comm.positions) is None
 
 
 def test_auto_placed_debris_never_lands_on_a_uav():

@@ -3,28 +3,32 @@
 scenario:
   name: uav_failure_rth
   description: >
-    At t = 140 s the busiest relay fails without warning. At t = 200 s a relay is drained to
-    18 %, so it requests a replacement, hands over and returns home to recharge.
-  duration_s: 600.0
+    At t = 140 s, while POI-A is being surveyed, the busiest relay fails without
+    warning. At t = 260 s a relay is drained to 25 %, just above the 20 %
+    return-to-home level, so it requests a replacement, hands over and returns
+    home to recharge.
+  duration_s: 900.0
   seed: 42
 
-area:
+area:                             # the operational center, the 75 m gap and the 1000 x 1000 m operational area
   x_min_m: -200.0
-  x_max_m: 900.0
-  y_min_m: -200.0
-  y_max_m: 700.0
+  x_max_m: 1100.0
+  y_min_m: -550.0
+  y_max_m: 550.0
 
 gcs:
-  position_m: [0.0, 0.0, 0.0]
+  position_m: [0.0, 0.0, 0.0]     # the operational center
 
-disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
+disaster_zone: [[75, -500], [1075, -500], [1075, 500], [75, 500]]   # the operational area
 
 uavs:
-  count: 9                        # 2 surveyors + 5 relays (100 m radio range) + 2 spares (fleet is 9-17)
+  count: auto                     # sized to these PoIs, plus a reserve for the loss below
+  min_count: 9
+  max_count: 25
   formation: grid
-  per_row: 3
+  per_row: 5
   spacing_m: 30.0                 # >= swarm.safety.min_separation_m, or neighbours collide on take-off
-  start_m: [-20.0, -40.0]
+  start_m: [-75.0, -60.0]         # the launch pad around the operational center
   initial_battery_pct: 100.0
 
 pois:
@@ -44,6 +48,6 @@ timeline:
     action: fail_uav
     params: {uav_id: critical_relay, reason: "motor failure"}
 
-  - at_s: 200.0
+  - at_s: 260.0
     action: set_battery
-    params: {uav_id: "role:RELAY", battery_pct: 19.0}
+    params: {uav_id: "role:RELAY", battery_pct: 25.0}

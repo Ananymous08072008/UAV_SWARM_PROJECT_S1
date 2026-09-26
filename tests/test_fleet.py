@@ -135,6 +135,14 @@ def test_a_tighter_deadline_needs_more_surveyors():
     assert short > long
 
 
+def test_late_appearing_pois_do_not_inflate_the_surveyor_count():
+    sim = make_sim(uavs=AUTO, pois=[], scenario={"duration_s": 1800.0},
+                   random_pois={"count": 6, "region_m": [300, -100, 800, 600], "spawn_s": [0.0, 1500.0]})
+    f = fleet(sim)
+    assert f["pois"] == 6
+    assert f["surveyors"] < 6      # one surveyor per PoI only helps when they are all there at once
+
+
 def test_without_a_relay_chain_there_are_no_relays():
     params = parameters(swarm={"fleet": {"relay_chain": False}})
     f = fleet(make_sim(params=params, uavs=AUTO, pois=[FAR, {**FAR, "id": "FAR2", "position_m": [800, 400]}]))
@@ -157,7 +165,8 @@ def test_the_demo_fleet_follows_its_random_pois(seed):
     sim = Simulation(Parameters.load(PROJECT_ROOT / "config" / "parameters.yaml"), scenario, results_dir=None)
     f = fleet(sim)
     assert f["sizing"] == "auto"
-    assert 9 <= f["uavs"] <= 17
-    assert f["pois"] == len(sim.world.state.pois)
-    assert 1 <= f["surveyors"] <= f["pois"] and f["over_budget"] is False
+    assert 9 <= f["uavs"] <= scenario.uavs.max_count and not f["capped"]
+    assert f["pois"] == len(sim.world.state.pois) + sim.world.pending_spawns == 10
+    assert 1 <= f["surveyors"] < f["pois"]
+    assert f["makespan_s"] < scenario.duration_s          # PoIs appearing late can push past the ideal budget
     assert len(sim.world.state.uavs) == f["uavs"]

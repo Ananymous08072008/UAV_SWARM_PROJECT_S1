@@ -82,13 +82,15 @@ Prx    = Ptx + Gtx + Grx - PL(d) - L_obstacle + N(0, sigma)
 SNR    = Prx - noise_floor
 PDR    = sigmoid((SNR - snr_mid) / snr_slope) * radio_health(a) * radio_health(b)
 est    = EWMA(PDR)            link up if est >= 0.55, down if est < 0.45 (hysteresis)
+PDR    = 0 beyond max_range_m (100 m): the hard radio range of the mission constraints
 latency = hop_latency + retx_latency * (1/PDR - 1)
 ```
 
-With the shipped values a healthy UAV-UAV link has its maximum range at 100 m (85 % PDR, the
-quality relays are planned for) and degrades beyond it (~73 % at 110 m, ~59 % at 120 m, dropping
-out around 130 m), so relays are spaced 90 m apart. A UAV-GCS link reaches ~328 m thanks to the
-high-gain ground antenna. Obstacles add 25-40 dB when the straight 3D
+With the shipped values a healthy link has 85 % PDR (the quality relays are planned for) at 100 m
+and none at all beyond it - UAV-UAV and UAV-GCS alike, since the ground station uses the same
+radio - so relays are spaced 90 m apart. The ground antenna's 10 m mast sits 50 m below the relays'
+flight level; at this range that height difference matters, so the first hop is shortened to ~78 m
+horizontally to keep the slanted link inside 100 m. Obstacles add 25-40 dB when the straight 3D
 segment passes through their prism.
 
 ### 3.2 Routing
@@ -102,21 +104,33 @@ best one **and** is strictly closer to the GCS, which prevents both flapping and
 
 ### 3.3 Task allocation (sequential auction)
 
-One PoI is set aside before any of this runs: the one farthest from the GCS, identified once at
-mission start (adaptive mode only). It is held out of the auction until every other PoI is done, so
-when its turn comes the whole fleet is free to build its relay chain - naturally the longest in the
-mission - just for it: a multi-hop escort, not a lone data-ferry run.
+PoIs appear during the mission (`random_pois.spawn_s`: 10 PoIs, each at a random place and a random
+time in the first 30 min); the swarm knows nothing about one until it appears, but the mission is
+not over - no recall - while more are still due.
+
+One PoI is set aside before any of this runs (adaptive mode only): of the mission's planned PoIs
+that have appeared and are not done, the one farthest from the GCS. While any other PoI is still
+open it is held out of the auction, so when its turn comes the whole fleet is free to build its
+relay chain - naturally the longest in the mission - just for it: a multi-hop escort, not a lone
+data-ferry run. The choice is re-made every tick, so a farther PoI that appears later takes over; a
+region reported outside the plan (`add_poi`) is never held back, and the priority manager never
+pre-empts a surveyor for the PoI being held back. The hold ends early only when waiting any longer
+could leave too little time to fly it: a UAV launched from its pad must still be able to fly out,
+survey and return before the recall with `defer_deadline_margin_s` (5 min) to spare - so a nearer
+survey that drags on cannot cost the farthest PoI its own.
 
 For each remaining pending PoI in effective-priority order (base priority + ageing bonus):
-feasible UAVs are IDLE/BACKUP with `battery >= fly + survey + return + reserve` and enough mission
-time left (a slimmer, still-safe reserve is tried if no UAV clears the normal one, so a PoI is not
-left waiting when one UAV could still just about do it). The winner has the lowest bid
+feasible UAVs are IDLE/BACKUP with `battery >= fly + survey + max(return + reserve, RTH level)` -
+so the survey always finishes above the return-to-home level - and enough mission time left (a
+slimmer, still-safe reserve is tried if no UAV clears the normal one, so a PoI is not left waiting
+when one UAV could still just about do it). The winner has the lowest bid
 `travel_time + w * battery_cost`. In adaptive mode the swarm also checks the **communication
 budget**: surveyors + the relays needed to connect them must fit in the fleet, otherwise the PoI
 waits for a relay path. Only once every PoI that fits the budget is tasked does a still-blocked PoI
 get a last look: with UAVs left that have nothing else to do, and either it is high priority and has
-stayed blocked for a while, or the mission deadline itself is close, it is surveyed disconnected and
-its imagery ferried back (store-and-forward) - a deliberately rare fallback, not a timeout, and the
+stayed blocked for a long while (15 min: a ferried PoI cannot report within 10 s), or the mission
+deadline itself is close, it is surveyed disconnected and its imagery ferried back
+(store-and-forward) - a deliberately rare fallback, not a timeout, and the
 "deadline close" half of that or is what keeps a low-priority PoI a tight relay budget never reaches
 from being abandoned for the whole mission.
 
@@ -129,7 +143,10 @@ that needs the fewest relays (shortest-tree/Prim style), so chains share a backb
 spaced so every planned hop predicts `>= min_planned_pdr` including obstacle attenuation; if a
 straight chain is blocked, dog-leg detours (25/45/65 degrees) are tried. Chains are filled in
 dependency order and only when the whole chain can be staffed - a partial chain connects nothing.
-A UAV already relaying near a planned point keeps it (`stickiness_s`).
+Within a chain the farthest points choose first, and a UAV only takes a point it can fly to and
+hold for `min_hold_s` above the level at which it would have to leave for home from there - so a
+UAV with little battery left takes a slot near the GCS rather than being sent to the far end and
+turned around. A UAV already relaying near a planned point keeps it (`stickiness_s`).
 
 Re-planning follows "repair only what is broken": a new plan is made when the survey targets or
 the eligible UAVs change, when a fault forces it, or periodically while a surveyor on station is
@@ -142,7 +159,7 @@ relays that still carry traffic would break links while they fly.
 |---|---|---|
 | Radio degradation | measured/predicted PDR `< 0.6` on `>= 2` links of one UAV for 2 s | exclude that UAV from the relay role, re-plan |
 | UAV loss | no heartbeat for `failure_timeout_s` | release its task and relay point, re-plan |
-| Obstacle | mapped when it appears | relays move only if a surveyor loses its route (planner detours) |
+| Obstacle | mapped when it appears | relays move only if a surveyor loses its route (planner detours). Scenario debris targets the longest hop a surveyor's traffic uses and never covers the GCS |
 | Surveyor disconnected | on station without a route for 2 s | re-plan |
 
 Comparing measurement with prediction is what separates a node fault (all links bad) from geometry
@@ -155,18 +172,33 @@ count as a recovery.
 
 ### 3.6 Energy and safety
 
-* RTH when `battery <= return_cost + reserve` (never below the critical floor).
+* RTH when `battery <= max(return_cost + reserve, battery.critical_pct)`: at 20 % for a UAV near
+  the pad, earlier only when the trip home needs more (up to ~40 % from the far corner at 5 m/s).
+  There is no other early return: an idle UAV stays airborne and available (no parking, no early
+  recharge) - after `idle_standby_after_s` with nothing to do it waits low over its own launch pad,
+  connected to the GCS and next to where every relay chain starts, instead of hovering out in the
+  field until the trip home forces it back early. It flies there above that standby level and only
+  comes down over its own pad: the pads are 30 m apart, so there is no gap to cross between the
+  UAVs already waiting. A surveyor that cannot finish its PoI keeps
+  surveying down to that level, its progress kept for the UAV that takes over. A UAV already over
+  its pad when it has to go home lands from where it is, rather than climbing to the 80 m transit
+  level first.
 * A relay inside the hand-over margin keeps relaying until its replacement is on station
   (or `max_handover_wait_s`), then flies home - connectivity is not interrupted by recharging.
-* A full battery lasts 1200 s at most (hovering; ~15 min flying at cruise speed).
+* A full battery lasts 1200 s at most (hovering; ~15 min flying at cruise speed, 5 m/s).
 * Two airborne UAVs closer than 20 m **collide and are both lost**. Nothing flies above 100 m.
 * Flight levels every 20 m (20, 40, 60, 80, 100 m), so UAVs on different levels can never collide.
   Waypoints take their role's level - survey 40, relay 60, return home 80 - unless another UAV is
   stationed within 30 m there, and are raised over obstacles. Launch pads are 30 m apart.
-* Predictive avoidance, every tick after the swarm's decisions: each plan is projected 12 s ahead
-  (including a returning UAV's landing descent). For a predicted conflict, the moving UAV (or else
-  the higher id) takes the least disruptive plan that stays clear of everyone's projected path -
-  carry on, change level, hold position, or stop - and returns to its level once clear.
+* Predictive avoidance, every tick after the swarm's decisions: each plan is projected 12 s ahead,
+  climbs and descents from the current vertical speed (a UAV still climbing when sent down carries
+  on up for a moment). For a predicted conflict, the moving UAV (or else the higher id) takes the
+  least disruptive plan that stays clear of everyone's projected path - carry on, change level,
+  hold position, or stop - and returns to its level once clear. A UAV stopped just after lift-off
+  holds just above its pad and resumes its take-off climb once the airspace above is clear.
+* Landing clearance: a descent crosses every level below and never gives way, so a UAV back over
+  its pad only starts down once the column under it is clear of everyone's plans; until then it
+  holds its level there and the others route round it (at most `landing_wait_max_s`, 60 s).
 * Every UAV is recalled early enough to land before the mission deadline; tasks that cannot finish
   in time are never assigned.
 
@@ -175,7 +207,7 @@ count as a recovery.
 | Group | Metrics |
 |---|---|
 | Mission | PoI completion rate and time, allocation runtime, response time to new high-priority regions, task reallocations, pre-emptions |
-| Communication | route PDR, latency, share of UAVs connected (network availability), full-connectivity fraction, downtime, disconnections, route changes, imagery delivered / live share / delay |
+| Communication | route PDR, latency, share of UAVs connected (network availability), full-connectivity fraction, downtime, disconnections, route changes, imagery delivered / live share (within 10 s) / delay - imagery drains at the route goodput, link capacity / ETX |
 | Resilience | incidents, detection time, recovery time, affected UAVs reconnected (share, time), unrecovered incidents, relay changes, hand-overs, re-plans |
 | Safety | minimum separation, collisions, avoidance manoeuvres, geofence/obstacle violations, UAVs lost, UAVs still airborne at the end |
 | Efficiency | distance flown, flight time, energy consumed, battery left, relay utilisation, RTH count |

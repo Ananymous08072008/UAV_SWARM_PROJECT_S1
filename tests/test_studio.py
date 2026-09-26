@@ -54,7 +54,7 @@ def client(manager):
 # --------------------------------------------------------------- mission builder
 def test_builder_uses_the_uav_count_and_pois_from_the_browser():
     scenario = build_scenario({"uav_count": 9, "pois": [{"x_m": 500, "y_m": 300, "priority": 5},
-                                                        {"x_m": 800, "y_m": 600}]})
+                                                        {"x_m": 800, "y_m": 450}]})
     assert scenario.uavs.count == 9
     assert [p.id for p in scenario.pois] == ["POI-1", "POI-2"]
     assert scenario.pois[0].position_m == (500.0, 300.0)
@@ -108,8 +108,8 @@ def test_builder_reflows_the_launch_grid_for_the_smallest_fleet():
     assert build_scenario({"uav_count": MIN_UAVS}).uavs.per_row <= MIN_UAVS
 
 
-def test_every_mission_flies_9_to_17_uavs():
-    assert (MIN_UAVS, MAX_UAVS) == (9, 17)
+def test_every_mission_flies_9_to_25_uavs():
+    assert (MIN_UAVS, MAX_UAVS) == (9, 25)
     auto = build_scenario({"uav_count": "auto"}).uavs
     assert (auto.min_count, auto.max_count) == (MIN_UAVS, MAX_UAVS)
     assert limits()["min_uavs"] == MIN_UAVS
@@ -159,6 +159,13 @@ def test_builder_clips_event_windows_to_a_short_mission(monkeypatch):
     monkeypatch.setattr(mission_module, "_template", base)
     timeline = build_scenario({"duration_s": 120}).timeline
     assert [(t.at_s, t.latest_s) for t in timeline] == [(50.0, 120.0)]   # the second cannot fit
+
+
+def test_pois_that_appear_over_time_fit_a_shorter_mission(monkeypatch):
+    base = replace(template(), random_pois=replace(template().random_pois, count=3, spawn_s=(0.0, 1800.0)),
+                   duration_s=2700.0)
+    monkeypatch.setattr(mission_module, "_template", base)
+    assert build_scenario({"duration_s": 900}).random_pois.spawn_s == pytest.approx((0.0, 600.0))   # same 2/3
 
 
 def test_faults_can_be_switched_off():

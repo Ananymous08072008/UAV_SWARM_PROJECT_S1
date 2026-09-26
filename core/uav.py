@@ -66,6 +66,7 @@ class CommState:
     hop_count: Optional[int] = None
     gcs_link_quality: float = 0.0       # 0..1, quality of the weakest link on the route
     pdr: float = 0.0                    # end-to-end packet delivery ratio to the GCS, 0..1
+    etx: Optional[float] = None         # expected transmissions per packet along the route (sum of 1/PDR per hop)
     latency_ms: Optional[float] = None  # end-to-end latency to the GCS
     radio_health: float = 1.0           # ground-truth radio condition (fault injection), 0..1
 
@@ -190,7 +191,9 @@ class UAV:
         delta = self.target - self.position
         dist_h = math.hypot(delta[0], delta[1])
         brake = BRAKE_MARGIN * p.max_accel_mps2
-        if self.climbing_out and delta[2] <= TAKEOFF_ALT_TOL_M:
+        if self.climbing_out and delta[2] <= TAKEOFF_ALT_TOL_M and not self.braking:
+            # Held by collision avoidance, a take-off is paused, not over: sent on up again,
+            # it still climbs to its level before flying on.
             self.climbing_out = False
         if dist_h > 1e-6 and not self.climbing_out and not self.braking:
             # Cruise, then brake along v = sqrt(2*a*d) so the UAV can stop on the waypoint.

@@ -17,16 +17,24 @@ Prevention
     allotted mission time ends; tasks that cannot finish in time are not given
 
 Avoidance (every tick, after the swarm's decisions and before anything moves)
-  Every airborne UAV's plan is projected ``conflict_horizon_s`` ahead,
-  including a returning UAV's landing descent. A pair predicted to come within
+  Every airborne UAV's plan is projected ``conflict_horizon_s`` ahead - climbs
+  and descents from the current vertical speed, so momentum is included; a
+  returning UAV holds its level over the pad until its landing is cleared
+  (below), so that is where it is projected. A pair predicted to come within
   the alert distance horizontally (the minimum separation now, growing to
   ``alert_distance_m`` further ahead) while less than the minimum separation
   apart vertically is a conflict. One UAV gives way - the moving one before a
   stationary one, otherwise the higher id; a UAV touching down never does. It
   takes the least disruptive plan that stays clear of everyone's projected
-  paths: carry on, change level, hold position, both, or stop dead. Conflicts
-  are handled most urgent first and each decision is seen by the next. A UAV
-  that gave way returns to its planned level once that is clear.
+  paths: carry on, change level, hold position, both, or stop dead (just after
+  lift-off: hold just above the pad and climb on once clear). Conflicts are
+  handled most urgent first and each decision is seen by the next. A UAV that
+  gave way returns to its planned level once that is clear.
+
+Landing clearance
+  Because a descent never gives way, it only starts once the column under the
+  UAV is clear of everyone's plans (``landing_clear``); until then the UAV holds
+  at its level over its pad, where the rest of the swarm routes round it.
 
 Monitoring (SAFETY_VIOLATION events + counters)
   * collisions, geofence (operating area), flying inside an obstacle
@@ -55,6 +63,7 @@ _SAMPLE_S = 0.5      # time step of the path projection
 _EPS_M = 1e-3        # two UAVs exactly one level apart are separated, not in conflict
 _RESUME = "back to planned level"
 _UNSTICK_S = 5.0     # held this long without being able to carry on: try another level
+_GROUND_M = 0.5      # a waypoint below this is a touchdown; avoidance never holds a UAV lower
 
 
 @dataclass(frozen=True)
@@ -67,6 +76,7 @@ class SafetyParams:
     obstacle_clearance_m: float = 10.0
     recall_at_deadline: bool = True
     recall_margin_s: float = 30.0
+    landing_wait_max_s: float = 60.0   # a UAV over its pad lands after this long even if its column is busy
 
     def __post_init__(self) -> None:
         if self.min_separation_m <= 0 or self.altitude_floor_m < 0 or self.conflict_horizon_s <= 0:
@@ -92,6 +102,11 @@ class SafetyManager:
         # UAVs moved off their level: uav_id -> (planned level, waypoint x/y, level we commanded instead)
         self._planned_level: dict[int, tuple[float, np.ndarray, float]] = {}
         self._held_since: dict[int, float] = {}           # uav_id -> when it started holding position
+        self._landing_wait: dict[int, float] = {}         # uav_id -> since when it waits over its pad to land
+        self._times = np.arange(0.0, params.conflict_horizon_s + 1e-9, _SAMPLE_S)
+        # The alert buffer covers prediction error, which grows with look-ahead time.
+        sep = params.min_separation_m
+        self._h_limit = sep + (params.alert_distance_m - sep) * np.minimum(1.0, self._times / 4.0)
 
         ceiling = world.params.uav.max_altitude_m
         if params.altitude_floor_m > ceiling:
@@ -155,6 +170,36 @@ class SafetyManager:
                                   severity=Severity.WARNING)
                 roles.return_home(uav, "mission deadline")
 
+    # ----------------------------------------------------------------- landing
+    def landing_clear(self, uav: UAV) -> bool:
+        """May ``uav``, over its own pad, start its landing descent now? (The World asks before
+        every descent: ``World.landing_clearance``.) The descent crosses every level below and,
+        once begun, never gives way, so it starts only when the column under the UAV stays clear
+        of every other airborne UAV's current plan over the look-ahead. Until then the UAV holds
+        at its level over the pad, where the others see it and route round it. After
+        ``landing_wait_max_s`` it lands regardless: its battery, or the mission, brought it home."""
+        since = self._landing_wait.setdefault(uav.uav_id, self.world.t)
+        clear = self.world.t - since >= self.params.landing_wait_max_s or self.column_clear(uav, 0.0)
+        if clear:
+            self._landing_wait.pop(uav.uav_id, None)
+        return clear
+
+    def column_clear(self, uav: UAV, down_to_m: float) -> bool:
+        """Would ``uav``, going straight down to ``down_to_m`` from where it hovers, stay clear of
+        every other airborne UAV's current plan over the look-ahead? Asked before a descent starts
+        - one begun with someone already beside the column leaves neither a way out."""
+        sep = self.params.min_separation_m
+        z = self._vertical(uav, down_to_m)
+        for other in self.world.state.operational_uavs():
+            if other is uav or not other.is_airborne:
+                continue
+            xy, other_z = self._project(other, self._level(other), other.braking)
+            hd = np.linalg.norm(xy - uav.position[:2], axis=-1)
+            h_limit = sep if self._is_still(xy) else self._h_limit
+            if np.any((hd < h_limit) & (np.abs(other_z - z) < sep - _EPS_M)):
+                return False
+        return True
+
     # -------------------------------------------------------------- monitoring
     def avoid(self) -> None:
         """Check every airborne UAV's plan for the next seconds and resolve predicted collisions."""
@@ -208,12 +253,13 @@ class SafetyManager:
     # --------------------------------------------------------------- avoidance
     def _project(self, uav: UAV, level: float, brake: bool) -> tuple[np.ndarray, np.ndarray]:
         """Where ``uav`` will be over the horizon if it flies to ``level`` and either carries on to its
-        waypoint (accelerating to cruise, x/y only after a take-off climb) or holds position (``brake``)."""
+        waypoint (accelerating to cruise, x/y only after a take-off climb) or holds position (``brake``).
+        A UAV coming home stays on its level over the pad: its descent starts only once cleared
+        (``landing_clear``), and from then on its waypoint - and so this projection - is the ground."""
         p, times = self.world.params.uav, self._times
         accel, pos, vel = p.max_accel_mps2, uav.position[:2], uav.velocity[:2]
-        z0 = float(uav.position[2])
-        dz = level - z0
-        z = z0 + np.sign(dz) * np.minimum(abs(dz), p.climb_rate_mps * times)
+        dz = level - float(uav.position[2])
+        z = self._vertical(uav, level)
         delta = None if uav.target is None else uav.target[:2] - pos
         dist = 0.0 if delta is None else float(np.hypot(*delta))
         if brake or delta is None:
@@ -225,7 +271,6 @@ class SafetyManager:
             return pos + (vel / speed)[None, :] * s[:, None], z
         if dist < 1e-6:
             xy = np.repeat(pos[None, :], len(times), axis=0)
-            arrive_s = 0.0
         else:
             direction = delta / dist
             v0 = min(max(0.0, float(np.dot(vel, direction))), p.cruise_speed_mps)
@@ -241,19 +286,35 @@ class SafetyManager:
                 t_stop = drift_speed / accel
                 d = np.where(times < t_stop, drift_speed * times - 0.5 * accel * times ** 2, drift_speed * t_stop / 2.0)
                 xy = xy + (drift / drift_speed)[None, :] * d[:, None]
-            reached = s >= dist - p.arrival_radius_m
-            arrive_s = float(times[np.argmax(reached)]) if reached.any() else math.inf
-        if uav.role is UAVRole.RETURNING and float(np.hypot(*(uav.target[:2] - uav.home[:2]))) < 1.0:
-            # Over the pad it lands: that descent crosses every level below.
-            down_s = max(arrive_s, abs(dz) / p.climb_rate_mps)
-            z = np.where(times > down_s, np.maximum(0.0, level - p.climb_rate_mps * (times - down_s)), z)
         return xy, z
+
+    def _vertical(self, uav: UAV, level: float) -> np.ndarray:
+        """Altitude over the horizon flying to ``level``: from the current climb or descent rate,
+        accelerating toward the climb rate in the direction of the level, and stopping on it. The
+        momentum matters: a UAV still climbing when sent down carries on up for a moment, enough
+        to turn a pass exactly one level (20 m) apart into a collision."""
+        p, times = self.world.params.uav, self._times
+        z0, vz0 = float(uav.position[2]), float(uav.velocity[2])
+        dz = level - z0
+        vz = math.copysign(p.climb_rate_mps, dz) if abs(dz) > 1e-6 else 0.0
+        t_acc = abs(vz - vz0) / p.max_accel_mps2
+        t = np.minimum(times, t_acc)
+        z = (z0 + vz0 * t + 0.5 * math.copysign(p.max_accel_mps2, vz - vz0) * t ** 2
+             + vz * np.maximum(0.0, times - t_acc))
+        if dz > 0:
+            z = np.minimum(z, level)
+        elif dz < 0:
+            z = np.maximum(z, level)
+        return np.maximum(z, 0.0)
 
     def _avoid(self, uavs: list[UAV]) -> None:
         for uav in self.world.state.operational_uavs():
             if uav.braking and not uav.is_airborne:
                 self.world.set_brake(uav.uav_id, False)
         self._held_since = {i: t for i, t in self._held_since.items() if self.world.state.uavs[i].braking}
+        self._landing_wait = {i: t for i, t in self._landing_wait.items()
+                              if self.world.state.uavs[i].is_operational
+                              and self.world.state.uavs[i].role is UAVRole.RETURNING}
         for uav_id, (_, xy, commanded) in list(self._planned_level.items()):
             uav = self.world.state.uavs.get(uav_id)
             if (uav is None or not self._can_manoeuvre(uav) or float(np.hypot(*(uav.target[:2] - xy))) > 1.0
@@ -262,12 +323,8 @@ class SafetyManager:
         if not uavs:
             return
 
-        p = self.params
-        sep = p.min_separation_m
+        sep = self.params.min_separation_m
         self._uavs = uavs
-        self._times = np.arange(0.0, p.conflict_horizon_s + 1e-9, _SAMPLE_S)
-        # The alert buffer covers prediction error, which grows with look-ahead time.
-        self._h_limit = sep + (p.alert_distance_m - sep) * np.minimum(1.0, self._times / 4.0)
         plans = [self._project(u, self._level(u), u.braking) for u in uavs]
         self._xy = np.stack([pl[0] for pl in plans])                # (n, S, 2)
         self._z = np.stack([pl[1] for pl in plans])                 # (n, S)
@@ -306,7 +363,7 @@ class SafetyManager:
     def _can_manoeuvre(uav: UAV) -> bool:
         """Airborne with a waypoint in the air. Touching down is committed: others go round it."""
         return (uav.is_operational and uav.is_airborne and uav.target is not None
-                and uav.target[2] >= 0.5 and uav.role is not UAVRole.CHARGING)
+                and uav.target[2] >= _GROUND_M and uav.role is not UAVRole.CHARGING)
 
     @staticmethod
     def _level(uav: UAV) -> float:
@@ -354,7 +411,9 @@ class SafetyManager:
 
     def _options(self, k: int, other_level_only: bool = False) -> list[tuple[float, bool]]:
         """Plans for UAV k, least disruptive first: carry on, change level, hold position,
-        change level while holding, stop dead."""
+        change level while holding, stop dead. Stopping dead just after lift-off holds the UAV
+        a little above its pad rather than at ground height, which would read as a touchdown
+        and leave it there for good: it climbs on once the airspace above is clear."""
         uav = self._uavs[k]
         if not self._can_manoeuvre(uav):
             return []
@@ -364,7 +423,7 @@ class SafetyManager:
         if other_level_only:
             return [(lv, False) for lv in levels] + [(lv, True) for lv in levels]
         return ([(current, False)] + [(lv, False) for lv in levels] + [(current, True)]
-                + [(lv, True) for lv in levels] + [(float(uav.position[2]), True)])
+                + [(lv, True) for lv in levels] + [(max(float(uav.position[2]), _GROUND_M), True)])
 
     def _replan(self, k: int, other_level_only: bool = False) -> bool:
         """Give UAV k the least disruptive plan that keeps it clear of everyone's current plans."""

@@ -4,7 +4,9 @@ Communication- and energy-aware assignment of survey tasks (sequential auction).
 
 For each pending PoI, in effective-priority order:
   1. Feasible UAVs: IDLE or BACKUP, enough battery to fly there, survey the
-     remaining time and still return home with a reserve, and able to finish
+     remaining time and still return home with a reserve - finishing the
+     survey above the return-to-home level (``battery.critical_pct``), so the
+     energy manager never has to pull it off halfway - and able to finish
      before the mission deadline. If no UAV clears the normal reserve, a UAV
      that clears a slimmer (but never unsafe) margin is used instead, rather
      than leaving the PoI - and the UAV - idle when nothing else can take it.
@@ -24,13 +26,19 @@ a low-priority PoI a tight relay budget never reaches is not abandoned for good)
 This is deliberately rare - see the module docstring in swarm/mission_manager.py
 for where it sits in the decision order.
 
-Before any of that, one PoI is singled out: the one farthest from the GCS
-(``_identify_farthest``, fixed once at mission start). It is held out of the
-auction entirely (``_defer_farthest``) until every other PoI is done, so by the
-time it is finally tasked the whole fleet is free for it. Being the farthest
-point, its relay chain is naturally the longest in the mission - built for it
-alone rather than shared with, or crowded out by, whatever else is in flight.
-That is what turns it into a multi-hop escort instead of a lone data-ferry run.
+Before any of that, one PoI is singled out: of the mission's planned PoIs that
+have appeared and are not done yet, the one farthest from the GCS
+(``_farthest_planned``). While any other PoI is still open it is held out of the
+auction entirely (``_defer_farthest``), so by the time it is finally tasked the
+whole fleet is free for it. Being the farthest point, its relay chain is
+naturally the longest in the mission - built for it alone rather than shared
+with, or crowded out by, whatever else is in flight. That is what turns it into
+a multi-hop escort instead of a lone data-ferry run. PoIs appear over time
+(``random_pois.spawn_s``), so the choice is re-made every tick: a farther one
+that appears later takes over; one already being flown is never pulled back. A
+region that emerges outside the plan (an ``add_poi`` report) is never held back.
+The hold ends early only when waiting any longer could leave too little time to
+fly it before the deadline (``_last_call``).
 
 Baseline mode skips step 2 (nearest feasible UAV, communication-unaware) and
 never ferries; it does not defer the farthest PoI either.
@@ -66,6 +74,7 @@ class AllocationParams:
     ferry_min_priority: int = 4       # a PoI at/above this priority may ferry before the deadline crunch ...
     ferry_min_blocked_s: float = 60.0     # ... once it has been continuously blocked at least this long
     ferry_deadline_margin_s: float = 600.0  # any blocked PoI may ferry once this little mission time is left
+    defer_deadline_margin_s: float = 300.0  # the farthest PoI stops waiting its turn with this little slack left
 
 
 class TaskAllocator:
@@ -90,6 +99,7 @@ class TaskAllocator:
         self.pending: list[PoI] = []                 # still-pending after the last allocate(), priority order
         self.waiting: set[str] = set()               # pending PoIs held back last tick for want of relays
         self.farthest_poi_id: Optional[str] = None   # the PoI the multi-hop chain is ultimately built for
+        self.deferred: set[str] = set()              # held back last tick as that farthest PoI
 
     # ------------------------------------------------------------- feasibility
     def _waypoint(self, poi: PoI):
@@ -100,7 +110,10 @@ class TaskAllocator:
         waypoint = self._waypoint(poi)
         remaining = max(0.0, poi.survey_time_s - poi.progress_s)
         reserve = self.params.reserve_pct if reserve_pct is None else reserve_pct
-        needed = self.env.battery.task_cost_pct(uav, waypoint, remaining) + reserve
+        bat = self.env.battery
+        outbound = bat.travel_cost_pct(uav.position, waypoint) + bat.hover_cost_pct(remaining)
+        home_leg = bat.task_cost_pct(uav, waypoint, remaining) - outbound
+        needed = outbound + max(home_leg + reserve, self.world.params.battery.critical_pct)
         return uav.battery_pct >= needed and self.safety.fits_deadline(uav, waypoint, remaining)
 
     def _bid(self, uav: UAV, poi: PoI) -> float:
@@ -116,40 +129,53 @@ class TaskAllocator:
         strict = sorted((self._bid(u, poi), u.uav_id, u) for u in available if self.can_do(u, poi))
         if strict:
             return strict, False
-        relaxed_reserve = max(self.world.params.battery.critical_pct, self.params.relaxed_reserve_pct)
+        # can_do keeps the return-to-home floor under every reserve, so a slimmer one stays safe.
         relaxed = sorted((self._bid(u, poi), u.uav_id, u) for u in available
-                         if self.can_do(u, poi, reserve_pct=relaxed_reserve))
+                         if self.can_do(u, poi, reserve_pct=self.params.relaxed_reserve_pct))
         return relaxed, bool(relaxed)
 
     # -------------------------------------------------------------- allocation
-    def _identify_farthest(self, world: "World") -> None:
-        """The single PoI farthest from the GCS, fixed once at mission start and never
-        reconsidered - a PoI added later (e.g. an urgent report) cannot become it. See
-        _defer_farthest for why it matters."""
-        if self.farthest_poi_id is not None:
-            return
-        pois = list(world.state.pois)
-        if not pois:
-            return
+    @staticmethod
+    def _farthest_planned(world: "World") -> Optional[PoI]:
+        """Of the mission's planned PoIs that have appeared and are not done, the one farthest
+        from the GCS. An emerging region reported outside the plan never counts."""
         gcs = np.asarray(world.state.gcs_position[:2], dtype=float)
-        self.farthest_poi_id = max(pois, key=lambda p: float(np.hypot(*(p.position[:2] - gcs)))).poi_id
+        open_pois = [p for p in world.state.pois if not p.is_completed and p.poi_id in world.planned_poi_ids]
+        return max(open_pois, key=lambda p: (float(np.hypot(*(p.position[:2] - gcs))), p.poi_id), default=None)
 
     def _defer_farthest(self, world: "World", pending: list[PoI]) -> list[PoI]:
-        """Hold the farthest PoI out of the auction until every other PoI in the mission is
-        done. By the time its turn comes the whole fleet is idle, so its relay chain - the
-        longest in the mission, being the farthest point - is planned for it alone instead
-        of competing with everything else still in flight: a multi-hop escort the swarm can
-        commit to fully, rather than a lone data-ferry run."""
-        if self.farthest_poi_id is None or not any(p.poi_id == self.farthest_poi_id for p in pending):
+        """Hold the farthest PoI out of the auction while any other PoI is still open. By the
+        time its turn comes the whole fleet is idle, so its relay chain - the longest in the
+        mission, being the farthest point - is planned for it alone instead of competing with
+        everything else still in flight: a multi-hop escort the swarm can commit to fully,
+        rather than a lone data-ferry run."""
+        farthest = self._farthest_planned(world)
+        self.farthest_poi_id = None if farthest is None else farthest.poi_id
+        self.deferred.clear()
+        if farthest is None or farthest.status is not PoIStatus.PENDING:
             return pending
-        others_done = all(p.is_completed for p in world.state.pois if p.poi_id != self.farthest_poi_id)
-        return pending if others_done else [p for p in pending if p.poi_id != self.farthest_poi_id]
+        if all(p.is_completed for p in world.state.pois if p is not farthest) or self._last_call(world, farthest):
+            return pending
+        self.deferred.add(farthest.poi_id)
+        return [p for p in pending if p is not farthest]
+
+    def _last_call(self, world: "World", poi: PoI) -> bool:
+        """True once holding ``poi`` back any longer could leave too little time to fly it: a UAV
+        launched from its pad needs to fly out, survey and come home before the recall, with
+        ``defer_deadline_margin_s`` to spare. A nearer PoI that is taking long must not cost the
+        farthest one its survey."""
+        fleet = world.state.operational_uavs()
+        if not fleet:
+            return False
+        waypoint = self._waypoint(poi)
+        remaining = max(0.0, poi.survey_time_s - poi.progress_s)
+        needed = min(self.env.battery.task_time_s(u, waypoint, remaining, start=u.home) for u in fleet)
+        return world.time_left_s <= needed + self.safety.params.recall_margin_s + self.params.defer_deadline_margin_s
 
     def allocate(self, world: "World") -> int:
         started = time.perf_counter()
         pending = self.priority.ordered_pending(world)
         if self.comm_aware:
-            self._identify_farthest(world)
             pending = self._defer_farthest(world, pending)
         available = [u for u in world.state.operational_uavs() if u.role in TASKABLE_ROLES]
         made = 0

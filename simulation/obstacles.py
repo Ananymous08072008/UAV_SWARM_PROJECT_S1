@@ -197,10 +197,13 @@ class ObstacleField:
                 centre = world.resolve_point(raw_centre)
                 size = float(params.pop("size_m", 120.0))
                 if isinstance(raw_centre, str):
-                    # placed by a selector (e.g. on the backbone): shrink so no flying UAV is
-                    # inside the footprint - debris blocks the link, it does not land on the UAVs
-                    clearance = min((max(abs(u.position[0] - centre[0]), abs(u.position[1] - centre[1]))
-                                     for u in world.state.operational_uavs() if u.is_airborne), default=None)
+                    # placed by a selector (e.g. on the backbone): shrink so no flying UAV - and
+                    # not the ground station either - is inside the footprint. Debris blocks
+                    # links; it does not land on the UAVs or bury the GCS antenna.
+                    keep_clear = [u.position for u in world.state.operational_uavs() if u.is_airborne]
+                    keep_clear.append(world.state.gcs_position)
+                    clearance = min((max(abs(p[0] - centre[0]), abs(p[1] - centre[1])) for p in keep_clear),
+                                    default=None)
                     if clearance is not None:
                         size = max(20.0, min(size, 2.0 * clearance - 10.0))
                 params["polygon_m"] = [list(p) for p in square("tmp", centre, size).polygon]

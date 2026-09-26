@@ -15,7 +15,7 @@ from core.uav import UAVRole
 from core.world import CommandError, _spatial_priorities
 from main import build_simulation, parse_args
 from simulation.obstacles import square
-from tests.helpers import make_sim, make_world, run_until, scenario
+from tests.helpers import make_sim, make_world, run_until, scenario, step_world
 
 REGION = [300.0, 100.0, 800.0, 600.0]
 
@@ -223,6 +223,35 @@ def test_a_random_urgent_poi_lands_in_the_region_and_not_in_debris():
     assert sim.env.obstacles.inside((x, y, 1.0)) is None
 
 
+# ------------------------------------------------------------ random spawn times
+def test_pois_can_appear_at_random_times():
+    world = make_world(pois=[], scenario={"duration_s": 900.0},
+                       random_pois={"count": 4, "region_m": REGION, "spawn_s": [100.0, 500.0]})
+    assert len(world.state.pois) == 0 and world.pending_spawns == 4      # nothing to see at launch
+    times = [p.created_at_s for p in world.scheduled_pois]
+    assert times == sorted(times) and all(100.0 <= t <= 500.0 for t in times)
+    step_world(world, times[0] + 0.5)
+    assert len(world.state.pois) == 1 and world.pending_spawns == 3
+    assert world.events.count(EventType.POI_ADDED) == 1
+    step_world(world, 501.0)
+    assert len(world.state.pois) == 4 and world.pending_spawns == 0
+
+
+def test_spawn_times_do_not_move_the_pois_of_a_seed():
+    def layout(pois):
+        return sorted((p.poi_id, tuple(np.round(p.position, 3)), p.priority, p.survey_time_s) for p in pois)
+
+    common = {"pois": [], "scenario": {"seed": 11, "duration_s": 900.0}}
+    at_once = make_world(**common, random_pois={"count": 5, "region_m": REGION})
+    later = make_world(**common, random_pois={"count": 5, "region_m": REGION, "spawn_s": [0.0, 600.0]})
+    assert layout(at_once.state.pois) == layout(later.scheduled_pois)
+
+
+def test_a_spawn_window_past_the_end_is_rejected():
+    with pytest.raises(ConfigError, match="spawn_s"):
+        scenario(random_pois={"count": 2, "spawn_s": [0.0, 400.0]})       # the run lasts 300 s
+
+
 # -------------------------------------------- bugs the random layouts exposed
 def test_a_uav_lifted_over_new_debris_keeps_flying_to_its_destination():
     sim = make_sim()
@@ -252,3 +281,17 @@ def test_a_poi_added_after_the_mission_reopens_it():
     assert sim.manager.mission_complete_s is None       # the mission is open again
     sim.run()
     assert sim.world.state.pois.get("LATE").is_completed
+
+
+def test_the_mission_is_not_over_while_pois_are_still_to_appear():
+    """Finishing every PoI seen so far must not recall the swarm when more are due."""
+    sim = make_sim(pois=[{"id": "EARLY", "position_m": [200, 0], "priority": 3, "survey_time_s": 20}],
+                   random_pois={"count": 1, "region_m": [150, -100, 300, 100], "spawn_s": [400.0, 400.0]},
+                   scenario={"duration_s": 900.0})
+    run_until(sim, 350)
+    assert sim.world.state.pois.get("EARLY").is_completed
+    assert sim.manager.mission_complete_s is None and not sim.is_finished
+    recalls = [e for e in sim.world.events.history(types=[EventType.RTH_STARTED]) if "mission complete" in e.message]
+    assert not recalls
+    sim.run()
+    assert sim.world.state.pois.get("POI-R1").is_completed

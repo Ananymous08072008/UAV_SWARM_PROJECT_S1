@@ -34,8 +34,10 @@ TEMPLATE_SCENARIO = PROJECT_ROOT / "config" / "scenario.yaml"
 
 # Ceilings for a server that strangers can post to. A 60-UAV 2-hour mission is a
 # denial of service, not a research question. Below 9 UAVs a relay-chained mission
-# stalls: the relay budget cannot cover the later PoIs and the fleet idles.
-MAX_UAVS = 17
+# stalls: the relay budget cannot cover the later PoIs and the fleet idles. The top
+# matches the template's pad: with a 100 m radio, the far corner of the operational
+# area alone takes a chain of about 13 relays.
+MAX_UAVS = 25
 MIN_UAVS = 9
 MAX_POIS = 25
 MAX_DURATION_S = 3600.0
@@ -156,6 +158,11 @@ def build_scenario(spec: Optional[Mapping[str, Any]] = None) -> ScenarioConfig:
     # on top would add ones nobody placed. With none clicked, the template's
     # (random) PoIs are used. The region is kept either way for a random urgent PoI.
     random_pois = replace(base.random_pois, count=0) if placed else base.random_pois
+    if random_pois.spawn_s is not None:
+        # The same share of a shorter (or longer) mission, so the last PoIs still appear
+        # with time left to fly them.
+        scale = duration_s / base.duration_s
+        random_pois = replace(random_pois, spawn_s=tuple(t * scale for t in random_pois.spawn_s))
     pois = placed or base.pois
     _require(pois or random_pois.max_count > 0, "a mission needs at least one PoI")
 

@@ -22,16 +22,20 @@ choosing which UAVs fly them.
 
 2. Assign (who flies each relay point)
    Chains are filled in priority order and only if the whole chain can be
-   filled. A UAV already relaying near a point keeps it (stickiness), others
-   are chosen by travel time, battery and exclusion lists (UAVs that are
-   leaving for recharge or whose radio was diagnosed as degraded).
+   filled. Within a chain the farthest points choose first - they need the
+   most battery. A UAV only takes a point it can fly to and then hold for
+   ``min_hold_s`` while staying above the level at which it would have to
+   leave for home from there. A UAV already relaying near a point keeps it
+   (stickiness), others are chosen by travel time, battery and exclusion
+   lists (UAVs that are leaving for recharge or whose radio was diagnosed as
+   degraded).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 import numpy as np
 
@@ -57,11 +61,12 @@ class RelayParams:
     stickiness_s: float = 30.0            # bonus for keeping the relay that is already there
     lookahead_pois: int = 3               # queued PoIs to plan a head start for, beyond the active ones
     max_lookahead_relays: int = 3         # cap on extra relays spent pre-positioning for them
+    min_hold_s: float = 60.0              # a relay must be able to hold its point this long before heading home
 
     def __post_init__(self) -> None:
         if not 0.5 <= self.min_planned_pdr < 1 or not 0 < self.spacing_safety <= 1:
             raise ValueError("invalid relay planning parameters")
-        if self.lookahead_pois < 0 or self.max_lookahead_relays < 0:
+        if self.lookahead_pois < 0 or self.max_lookahead_relays < 0 or self.min_hold_s < 0:
             raise ValueError("invalid relay planning parameters")
 
 
@@ -114,9 +119,18 @@ class RelaySelector:
         self._signature: Optional[tuple] = None
         self._last_plan_t = -math.inf
         self.replans = 0
+        # Battery at which a UAV standing at a point would have to leave for home; wired in by
+        # the mission manager (swarm/energy_manager.py). None = relay points are not energy-checked.
+        self.needed_at: Optional[Callable[[UAV, np.ndarray], float]] = None
         comm = env.comm
         self.hop_m = comm.range_for_pdr(params.min_planned_pdr) * params.spacing_safety
-        self.gcs_hop_m = comm.range_for_pdr(params.min_planned_pdr, involves_gcs=True) * params.spacing_safety
+        gcs_reach = comm.range_for_pdr(params.min_planned_pdr, involves_gcs=True)
+        climb = params.relay_altitude_m - comm.params.gcs_antenna_height_m
+        self.gcs_hop_m = gcs_reach * params.spacing_safety
+        if math.hypot(self.gcs_hop_m, climb) > gcs_reach:
+            # With a short radio range the ground antenna sits so far below the relays that a
+            # full-length first hop would slant out of reach: space only its horizontal part.
+            self.gcs_hop_m = math.sqrt(max(gcs_reach ** 2 - climb ** 2, 0.0)) * params.spacing_safety
 
     # ---------------------------------------------------------------- planning
     def terminals(self, world: "World") -> list[Terminal]:
@@ -303,20 +317,37 @@ class RelaySelector:
             cost -= self.params.stickiness_s
         return cost
 
+    def _can_hold(self, uav: UAV, point: np.ndarray) -> bool:
+        """Enough battery to fly to ``point`` and hold it for ``min_hold_s`` without dropping to
+        the level at which it would have to leave for home from there."""
+        if self.needed_at is None:
+            return True
+        bat = self.env.battery
+        spend = bat.travel_cost_pct(uav.position, point) + bat.hover_cost_pct(self.params.min_hold_s)
+        return uav.battery_pct - spend >= self.needed_at(uav, point)
+
     def _assign(self, world: "World") -> None:
         free = {u.uav_id: u for u in self._candidates(world)}
         assignment: dict[int, tuple[np.ndarray, str]] = {}
         filled: set[str] = set()
+        gcs = self.env.comm.gcs_antenna_position(world)
         for chain in self.plan.chains:  # plan order = dependency order
             if chain.depends_on is not None and chain.depends_on not in filled:
                 continue  # its anchor chain could not be filled, so this one would connect nothing
             if len(chain.points) > len(free):
                 continue  # a partial chain does not connect anything
+            picked: dict[int, np.ndarray] = {}
+            for point in sorted(chain.points, key=lambda p: -float(np.hypot(*(p[:2] - gcs[:2])))):
+                able = [u for u in free.values() if u.uav_id not in picked and self._can_hold(u, point)]
+                if not able:
+                    break
+                picked[min(able, key=lambda u: (self._cost(u, point), u.uav_id)).uav_id] = point
+            if len(picked) < len(chain.points):
+                continue  # a partial chain does not connect anything
             filled.add(chain.terminal)
-            for point in chain.points:
-                uav = min(free.values(), key=lambda u: (self._cost(u, point), u.uav_id))
-                assignment[uav.uav_id] = (point, chain.terminal)
-                del free[uav.uav_id]
+            for uav_id, point in picked.items():
+                assignment[uav_id] = (point, chain.terminal)
+                del free[uav_id]
 
         for uav_id, (point, terminal) in assignment.items():
             uav = world.state.uavs[uav_id]

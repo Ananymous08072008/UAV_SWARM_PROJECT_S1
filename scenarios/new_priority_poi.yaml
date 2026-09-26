@@ -4,28 +4,30 @@
 scenario:
   name: new_priority_poi
   description: >
-    Nine UAVs (two surveys, the relays that keep them connected, two spares) are
-    flying when a priority-5 region appears at t = 120 s. Measures the response time to it.
-  duration_s: 600.0
+    While POI-A is being surveyed (and the farther POI-B waits its turn), a
+    priority-5 region is reported at t = 120 s. Measures the response time to it.
+  duration_s: 900.0
   seed: 42
 
-area:
+area:                             # the operational center, the 75 m gap and the 1000 x 1000 m operational area
   x_min_m: -200.0
-  x_max_m: 900.0
-  y_min_m: -200.0
-  y_max_m: 700.0
+  x_max_m: 1100.0
+  y_min_m: -550.0
+  y_max_m: 550.0
 
 gcs:
-  position_m: [0.0, 0.0, 0.0]
+  position_m: [0.0, 0.0, 0.0]     # the operational center
 
-disaster_zone: [[250, -100], [850, -100], [850, 600], [200, 600]]
+disaster_zone: [[75, -500], [1075, -500], [1075, 500], [75, 500]]   # the operational area
 
 uavs:
-  count: 9                        # 2 surveyors + their 5 relays + 2 spares (fleet is 9-17)
+  count: auto                     # sized to these PoIs, the reported region included
+  min_count: 9
+  max_count: 25
   formation: grid
-  per_row: 3
+  per_row: 5
   spacing_m: 30.0                 # >= swarm.safety.min_separation_m, or neighbours collide on take-off
-  start_m: [-20.0, -40.0]
+  start_m: [-75.0, -60.0]         # the launch pad around the operational center
   initial_battery_pct: 100.0
 
 pois:
@@ -43,4 +45,4 @@ obstacles: []
 timeline:
   - at_s: 120.0
     action: add_poi
-    params: {id: POI-URGENT, position_m: [300.0, 520.0], priority: 5, survey_time_s: 50.0}
+    params: {id: POI-URGENT, position_m: [300.0, 450.0], priority: 5, survey_time_s: 50.0}

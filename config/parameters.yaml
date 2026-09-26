@@ -8,6 +8,17 @@
 # Units: metres, seconds, degrees, percent, dB, Mbit/s.
 # Local frame is ENU: x = East, y = North, z = Up, origin = GCS.
 # Unknown keys inside a section raise an error (typo protection).
+#
+# Mission constraints and where each one is set:
+#   UAV max flight time 20 min ........ battery.hover_drain_pct_per_min (5 %/min)
+#   max comm range 100 m .............. communication (every link, ground station included)
+#   operational height max 100 m ...... uav.max_altitude_m
+#   max speed 5 m/s ................... uav.cruise_speed_mps (horizontal)
+#   min distance between vehicles 20 m  swarm.safety.min_separation_m
+#   PoI reported to the center <= 10 s  data.live_delay_s
+#   return to home below 20 % battery . battery.critical_pct (+ swarm.energy)
+#   45 min mission, 1000 x 1000 m area, 10 PoIs at random places and times,
+#   take-off from / landing at the operational center: config/scenario.yaml
 # =====================================================================
 
 simulation:
@@ -23,7 +34,7 @@ geo_origin:
   alt_msl_m: 584.0
 
 uav:
-  cruise_speed_mps: 10.0
+  cruise_speed_mps: 5.0      # max speed 5 m/s (horizontal; climb/descent separately at climb_rate_mps)
   max_accel_mps2: 3.0
   climb_rate_mps: 3.0
   arrival_radius_m: 2.0
@@ -33,24 +44,28 @@ uav:
   heading_min_speed_mps: 0.5
 
 battery:
-  hover_drain_pct_per_min: 5.0    # 100 % / 5 %/min = 1200 s: the longest a UAV can stay airborne
-  cruise_drain_pct_per_min: 1.5   # EXTRA drain at cruise speed (~15 min flying at 10 m/s)
+  hover_drain_pct_per_min: 5.0    # 100 % / 5 %/min = 1200 s = 20 min: the longest a UAV can stay airborne
+  cruise_drain_pct_per_min: 1.5   # EXTRA drain at cruise speed (~15 min of continuous cruising)
   low_pct: 30.0
-  critical_pct: 15.0
+  critical_pct: 20.0              # return to home here - or earlier, only if the trip home needs more
+                                  # (1.2 km out at 5 m/s that is ~40 %); swarm.energy adds the reserve
   charge_rate_pct_per_min: 25.0   # battery swap / fast charge on the home pad
   resume_pct: 95.0
 
 # --- swarm research network (simulation/communication.py) -------------
 # Log-distance path loss + logistic PDR curve. With these values a healthy
-# UAV-UAV link has its maximum range at 100 m (85 % PDR, the quality relays
-# are planned for) and degrades beyond it: ~73 % at 110 m, ~59 % at 120 m,
-# dropping out around 130 m. A UAV-GCS link reaches ~328 m at 85 % thanks to
-# the high-gain ground antenna.
+# link has 85 % PDR (the quality relays are planned for) at 100 m, and
+# max_range_m cuts every link beyond 100 m outright: the 100 m radio range of
+# the mission constraints. The ground station uses the same radio (no
+# high-gain antenna), so the first relay sits within 100 m of it too - the
+# relay planner shortens that first hop for the 50 m height difference
+# between the 10 m mast and the relays' 60 m flight level.
 communication:
   tx_power_dbm: 12.6
   uav_antenna_gain_dbi: 0.0
-  gcs_antenna_gain_dbi: 13.4
+  gcs_antenna_gain_dbi: 0.0
   gcs_antenna_height_m: 10.0
+  max_range_m: 100.0        # max comm range: no link at all beyond it
   path_loss_ref_db: 40.0
   path_loss_exponent: 2.6
   noise_floor_dbm: -90.0
@@ -70,7 +85,7 @@ data:
   link_capacity_mbps: 40.0
   buffer_capacity_mb: 4000.0
   pad_download_mbps: 100.0
-  live_delay_s: 10.0          # imagery delivered within 10 s counts as live
+  live_delay_s: 10.0          # imagery delivered within 10 s counts as live (max PoI report delay)
 
 # --- swarm intelligence (swarm/*) -------------------------------------
 swarm:
@@ -78,6 +93,8 @@ swarm:
   backup_enabled: true
   backup_min_battery_pct: 60.0
   data_ferry: true            # disconnected UAVs carry data back themselves
+  idle_standby_after_s: 20.0  # an idle UAV with nothing to do waits airborne, low over its own pad
+                              # (connected, ready for the next role; it lands only at the RTH level)
 
   # Fleet sizing for scenarios with `uavs: {count: auto}` (swarm/fleet_planner.py):
   # the fewest surveyors that finish every PoI in time (one after another by priority)
@@ -98,28 +115,34 @@ swarm:
     battery_weight_s: 2.0     # seconds of travel that 1 % of battery is worth
     relaxed_reserve_pct: 4.0  # fallback reserve when no UAV clears reserve_pct for a PoI
     ferry_min_priority: 4     # priority >= this may ferry (store-and-forward) before the deadline crunch ...
-    ferry_min_blocked_s: 60.0    # ... once continuously blocked at least this long, not on one tight tick
+    ferry_min_blocked_s: 900.0   # ... but only after 15 min without a relay path: a ferried PoI cannot report
+                                 # within 10 s, and at 5 m/s a long chain takes minutes to free up
     ferry_deadline_margin_s: 600.0  # any blocked PoI may ferry once this little mission time is left
+    defer_deadline_margin_s: 300.0  # the farthest PoI waits for the rest until only this much slack is left
 
   relay:
     relay_altitude_m: 60.0
     min_planned_pdr: 0.85     # planned quality of every hop
     spacing_safety: 0.9
     reposition_threshold_m: 25.0
-    min_battery_pct: 35.0
+    min_battery_pct: 20.0     # any UAV above the return-to-home level may relay ...
+    min_hold_s: 120.0         # ... at a point it can reach and hold this long before it has to head home
     replan_interval_s: 10.0
     stickiness_s: 30.0        # bonus for keeping the relay that is already there
     lookahead_pois: 3         # queued PoIs to plan a head start for, beyond the ones being surveyed now
     max_lookahead_relays: 3   # cap on extra relays spent pre-positioning for them
 
+  # Return to home only at the battery.critical_pct level (20 %), or when the trip home
+  # needs more; until then a UAV keeps flying whatever role the swarm gives it.
   energy:
     reserve_pct: 8.0
     handover: true
     handover_margin_pct: 6.0
-    max_handover_wait_s: 60.0
-    idle_recharge_below_pct: 60.0
+    max_handover_wait_s: 300.0  # a replacement may need minutes at 5 m/s; the relay stays until it arrives
+    idle_recharge_below_pct: 0.0   # off: an idle UAV stays available instead of recharging early
     idle_recharge_after_s: 20.0
-    park_when_idle: true      # IDLE with nothing to do -> land and top up instead of hovering still
+    park_when_idle: false          # an idle UAV waits airborne, ready for its next role
+    leave_unfinishable_survey: false  # keep surveying down to the RTH level; progress is kept for the next UAV
 
   priority:
     ageing_per_min: 0.25      # waiting PoIs slowly gain priority (no starvation)
@@ -129,7 +152,7 @@ swarm:
     preempt_priority_gap: 2
 
   safety:
-    min_separation_m: 20.0    # two airborne UAVs closer than this collide (both are lost)
+    min_separation_m: 20.0    # min distance between vehicles: closer than this they collide (both are lost)
     altitude_floor_m: 20.0    # flight levels 20, 40, 60, 80, 100 m (up to uav.max_altitude_m)
     layer_spacing_m: 20.0     # >= min_separation_m, so UAVs on different levels never collide
     alert_distance_m: 30.0    # predicted to pass closer than this horizontally -> separate vertically
@@ -137,6 +160,7 @@ swarm:
     obstacle_clearance_m: 10.0
     recall_at_deadline: true
     recall_margin_s: 30.0
+    landing_wait_max_s: 60.0  # a UAV over its pad waits for its landing column to clear at most this long
 
   reconfiguration:
     enabled: true

@@ -130,25 +130,30 @@ surveyors, so the swarm queues them by priority. The breakdown is printed at sta
 (`FLEET_PLANNED`), shown under **UAVs** in the studio header, and recorded in the
 *Mission metrics* sheet. Tune it in `config/parameters.yaml` under `swarm.fleet`;
 `uavs.max_count` caps it. Untick **Size the fleet to the mission** in the studio,
-or give `count` a number in a scenario file, to fix the fleet size instead — the
-focused scenarios in `scenarios/` do, because each is a controlled experiment.
+or give `count` a number in a scenario file, to fix the fleet size instead.
 
-## Operating limits
+## Operating limits (the mission constraints)
 
 | Limit | Value | Where |
 |---|---|---|
-| Mission time (demo, studio default) | 2700 s | `config/scenario.yaml` `scenario.duration_s` |
-| Maximum flight time | 1200 s on a full battery (hovering; ~15 min at cruise speed) | `parameters.yaml` `battery.hover_drain_pct_per_min: 5.0` |
-| UAV-UAV radio range | 100 m at 85 % PDR; degrades beyond (~59 % at 120 m, gone by ~130 m) | `parameters.yaml` `communication.tx_power_dbm` |
-| UAV-GCS radio range | ~328 m (unchanged, high-gain ground antenna) | `communication.gcs_antenna_gain_dbi` |
+| Mission time (demo, studio default) | 2700 s (45 min); every UAV lands back at the operational center | `config/scenario.yaml` `scenario.duration_s` |
+| Operational area | 1000 x 1000 m, 75 m from the operational center (GCS + launch pad) | `config/scenario.yaml` `random_pois.region_m` |
+| PoIs | 10, each at a random place and a random time in the first 30 min | `random_pois.count`, `random_pois.spawn_s` |
+| Maximum flight time | 1200 s (20 min) on a full battery (hovering; ~15 min at cruise speed) | `parameters.yaml` `battery.hover_drain_pct_per_min: 5.0` |
+| Maximum speed | 5 m/s | `uav.cruise_speed_mps` |
+| Radio range | 100 m, every link (ground station included): 85 % PDR at 100 m, nothing beyond | `communication.max_range_m`, `communication.gcs_antenna_gain_dbi: 0` |
+| PoI report delay | imagery counts as live when it reaches the GCS within 10 s | `data.live_delay_s` |
+| Return to home | at 20 % battery - earlier only when the trip home needs more | `battery.critical_pct` |
 | Maximum height | 100 m | `uav.max_altitude_m` |
 | Minimum separation | 20 m - closer is a **collision and both UAVs are lost** | `swarm.safety.min_separation_m` |
 
-The swarm keeps to them on its own: relays are spaced 90 m apart, UAVs fly on
-levels 20 m apart (20-100 m), and every tick the safety layer looks 12 s ahead
-and moves a UAV to another level or holds it in place before two could come
-within 20 m. Launch pads are 30 m apart for the same reason. A mission longer
-than a battery simply rotates UAVs home to recharge.
+The swarm keeps to them on its own: relays are spaced 90 m apart (the first
+one ~78 m from the ground antenna, whose 10 m mast sits 50 m below the relays),
+UAVs fly on levels 20 m apart (20-100 m), and every tick the safety layer looks
+12 s ahead and moves a UAV to another level or holds it in place before two could
+come within 20 m. Launch pads are 30 m apart for the same reason. A mission longer
+than a battery simply rotates UAVs home to recharge; until it reaches 20 % a UAV
+keeps taking roles, and with nothing to do it waits airborne over its own pad.
 
 ---
 
@@ -211,8 +216,9 @@ python experiments/plot_results.py
 ### 3. Confirm it worked
 
 **Every run of the demo is different.** It draws a new seed each time, and from it
-4-8 PoIs at random places in the disaster zone plus a random time for each fault
-inside its window (`config/scenario.yaml`). The first line of output is the seed:
+the places and appearance times of the 10 PoIs in the operational area plus a
+random time for each fault inside its window (`config/scenario.yaml`). The first
+line of output is the seed:
 
 ```
 Seed 1257299661 (drawn for this run; replay it with --seed 1257299661)
@@ -224,11 +230,11 @@ times, same result. Use it to investigate a run you saw, or to record a video.
 Because the mission changes, so do the numbers. What every run should show:
 
 ```
-completion_rate              1.0      every PoI surveyed, including the urgent one
+completion_rate              1.0      all 10 PoIs surveyed
 uavs_airborne_at_end         0        everyone landed
 ```
 
-and no `TRIGGER_REJECTED` line in the log: all six faults were injected. When a
+and no `TRIGGER_REJECTED` line in the log: all five faults were injected. When a
 fault's target does not exist at its drawn time (say, no relay while the chain is
 being rebuilt), it waits for one and the log says so: `(planned for 124.4s,
 waited 2.0s for a target)`.
@@ -239,10 +245,12 @@ separation near-miss, and about a third record a UAV inside the debris before it
 climbs clear. The fixed layout the demo used before hid all of that - it recovered
 every incident on every seed.
 
-The focused scenarios in `scenarios/` are unchanged: fixed PoIs, fixed event
-times and `seed: 42`, so they stay controlled, comparable experiments. Any of them
-can opt in with the same syntax - `seed: random`, `random_pois: {count: [4, 8],
-region_m: [...]}`, and `at_s: [earliest, latest]` on a timeline entry.
+The focused scenarios in `scenarios/` keep fixed PoIs, fixed event times and
+`seed: 42`, so they stay controlled, comparable experiments (they share the
+demo's geometry and limits, with fleets sized to their two or three PoIs). Any of
+them can opt in to randomness with the same syntax - `seed: random`,
+`random_pois: {count: 10, region_m: [...], spawn_s: [0, 1800]}`, and
+`at_s: [earliest, latest]` on a timeline entry.
 
 To stop a dashboard or demo run, press **Ctrl+C**. The dashboard keeps serving
 the final state after the mission ends, so Ctrl+C is how you exit.

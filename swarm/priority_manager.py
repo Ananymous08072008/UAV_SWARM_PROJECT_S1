@@ -39,6 +39,7 @@ class PriorityManager:
         self.roles = roles
         self.params = params
         self._watch: list[str] = []
+        self.held: set[str] = set()   # PoIs the allocator is holding back on purpose: never pre-empt for them
         self.preemptions = 0
         world.events.subscribe(self._on_poi_added, types=[EventType.POI_ADDED])
 
@@ -61,6 +62,9 @@ class PriorityManager:
             if poi.status is not PoIStatus.PENDING:
                 continue
             if not self.params.preempt or poi.priority < self.params.preempt_min_priority:
+                continue
+            if poi_id in self.held:
+                still_waiting.append(poi_id)
                 continue
             victim = self._pick_victim(world, poi, can_do)
             if victim is None:

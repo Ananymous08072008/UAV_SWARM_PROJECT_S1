@@ -334,6 +334,10 @@ class RandomPoIConfig:
     (core/world.py, ``_spatial_priorities``) - PoIs that cluster together are worth
     visiting as a group, an isolated one less so unless it is close to the GCS.
     ``cluster_radius_m`` is how close two PoIs must be to count as the same cluster.
+
+    ``spawn_s`` ([earliest, latest]) makes each PoI appear at its own random time in
+    that window instead of all being there at launch; the swarm knows nothing about
+    one until it appears. Left out, every PoI exists from the start.
     """
 
     count: int | tuple[int, int] = 0
@@ -342,6 +346,7 @@ class RandomPoIConfig:
     region_m: Optional[tuple[float, float, float, float]] = None
     min_spacing_m: float = 0.0
     cluster_radius_m: float = 250.0
+    spawn_s: Optional[tuple[float, float]] = None
 
     def __post_init__(self) -> None:
         if isinstance(self.count, (list, tuple)):
@@ -362,6 +367,10 @@ class RandomPoIConfig:
         _require(0 < t_lo <= t_hi, "survey_time_s must be [low, high] with 0 < low <= high")
         object.__setattr__(self, "survey_time_s", (t_lo, t_hi))
         _require(self.margin_m >= 0, "margin_m must be >= 0")
+        if self.spawn_s is not None:
+            s_lo, s_hi = _float_tuple(self.spawn_s, 2, "spawn_s")
+            _require(0 <= s_lo <= s_hi, "spawn_s must be [earliest, latest] with 0 <= earliest <= latest")
+            object.__setattr__(self, "spawn_s", (s_lo, s_hi))
 
     @property
     def max_count(self) -> int:
@@ -461,6 +470,8 @@ class ScenarioConfig:
         x0, y0, x1, y1 = rnd.bounds(self.area)
         _require(rnd.max_count == 0 or (x0 < x1 and y0 < y1),
                  "random_pois.margin_m leaves no room inside the area (or region_m)")
+        _require(rnd.spawn_s is None or rnd.spawn_s[1] <= self.duration_s,
+                 f"random_pois.spawn_s {rnd.spawn_s} reaches past the scenario end ({self.duration_s}s)")
         for trig in self.timeline:
             _require(trig.latest_s <= self.duration_s,
                      f"trigger '{trig.action}' at {trig.latest_s}s is after the scenario end ({self.duration_s}s)")

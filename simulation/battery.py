@@ -10,7 +10,7 @@ The per-step drain itself happens in core/uav.py (execution) using the same
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import Optional, Sequence
 
 from core.config import BatteryParams, UAVParams
 from core.uav import UAV, drain_rate_pct_per_min
@@ -50,10 +50,12 @@ class BatteryModel:
         home_above = (uav.home[0], uav.home[1], self.uav_p.rth_altitude_m)
         return self.travel_time_s(uav.position, home_above) + self.uav_p.rth_altitude_m / self.uav_p.climb_rate_mps
 
-    def return_cost_pct(self, uav: UAV) -> float:
+    def return_cost_pct(self, uav: UAV, start: Optional[Sequence[float]] = None) -> float:
+        """Fly home from ``start`` (default: where the UAV is now) at RTH altitude, then descend."""
         home_above = (uav.home[0], uav.home[1], self.uav_p.rth_altitude_m)
         descent_s = self.uav_p.rth_altitude_m / self.uav_p.climb_rate_mps
-        return self.travel_cost_pct(uav.position, home_above) + self.hover_cost_pct(descent_s)
+        origin = uav.position if start is None else start
+        return self.travel_cost_pct(origin, home_above) + self.hover_cost_pct(descent_s)
 
     def task_cost_pct(self, uav: UAV, waypoint: Sequence[float], hover_s: float) -> float:
         """Battery needed to fly to ``waypoint``, hover ``hover_s`` there and still get home."""
@@ -62,7 +64,11 @@ class BatteryModel:
         return (self.travel_cost_pct(uav.position, waypoint) + self.hover_cost_pct(hover_s)
                 + self.travel_cost_pct(waypoint, home_above) + self.hover_cost_pct(descent_s))
 
-    def task_time_s(self, uav: UAV, waypoint: Sequence[float], hover_s: float) -> float:
+    def task_time_s(self, uav: UAV, waypoint: Sequence[float], hover_s: float,
+                    start: Optional[Sequence[float]] = None) -> float:
+        """Time to fly from ``start`` (default: where the UAV is now) to ``waypoint``, hover
+        ``hover_s`` there, and get home."""
         home_above = (uav.home[0], uav.home[1], self.uav_p.rth_altitude_m)
-        return (self.travel_time_s(uav.position, waypoint) + hover_s + self.travel_time_s(waypoint, home_above)
+        origin = uav.position if start is None else start
+        return (self.travel_time_s(origin, waypoint) + hover_s + self.travel_time_s(waypoint, home_above)
                 + self.uav_p.rth_altitude_m / self.uav_p.climb_rate_mps)

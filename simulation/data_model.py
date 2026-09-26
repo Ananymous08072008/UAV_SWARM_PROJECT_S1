@@ -3,8 +3,13 @@ simulation/data_model.py
 Imagery / situational data produced at PoIs and carried back to the GCS.
 
 * A UAV surveying a PoI generates ``imagery_rate_mbps`` into its on-board buffer.
-* Whenever the UAV has a route to the GCS, the buffer drains at the route
-  throughput = link_capacity / hop_count * end-to-end PDR (FIFO).
+* Whenever the UAV has a route to the GCS, the buffer drains (FIFO) at the
+  route goodput = link_capacity / ETX. ETX (expected transmissions, the sum of
+  1 / PDR over the hops) charges every hop its share of the channel plus its
+  link-layer retransmissions - the same per-hop retransmission assumption the
+  router's cost and the latency model make, so a lossy hop slows delivery
+  rather than silently dropping data. (A route given only a hop count and an
+  end-to-end PDR drains at link_capacity / hop_count * PDR.)
 * A disconnected UAV keeps its data (store-and-forward / data ferrying) until
   it reconnects. A failed UAV loses its buffer.
 
@@ -60,6 +65,11 @@ class DataModel:
     def buffer_mb(self, uav_id: int) -> float:
         return sum(mb for _, mb, *_ in self._buffers.get(uav_id, ()))
 
+    @property
+    def buffered_mb(self) -> float:
+        """Imagery still on board any UAV, not yet at the GCS."""
+        return sum(self.buffer_mb(uid) for uid in self._buffers)
+
     def update(self, world: "World", dt: float) -> None:
         p, t = self.params, world.t
         for uav in world.state.uavs.values():
@@ -86,8 +96,12 @@ class DataModel:
             comm = uav.comm
             on_pad = not uav.is_airborne and uav.horizontal_distance_to(uav.home) <= 5.0
             if buf and (on_pad or (comm.connected and comm.hop_count)):
-                budget = (p.pad_download_mbps * dt if on_pad
-                          else p.link_capacity_mbps / comm.hop_count * comm.pdr * dt)
+                if on_pad:
+                    budget = p.pad_download_mbps * dt
+                elif comm.etx:
+                    budget = p.link_capacity_mbps / comm.etx * dt
+                else:
+                    budget = p.link_capacity_mbps / comm.hop_count * comm.pdr * dt
                 while buf and budget > 1e-12:
                     chunk = buf[0]
                     sent = min(chunk[1], budget)
@@ -106,7 +120,7 @@ class DataModel:
         self.delivered_by_poi[poi_id] = self.delivered_by_poi.get(poi_id, 0.0) + mb
 
     def stats(self) -> dict[str, Any]:
-        buffered = sum(self.buffer_mb(uid) for uid in self._buffers)
+        buffered = self.buffered_mb
         return {
             "generated_mb": round(self.generated_mb, 1),
             "delivered_mb": round(self.delivered_mb, 1),

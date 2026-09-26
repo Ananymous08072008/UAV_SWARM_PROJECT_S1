@@ -66,13 +66,15 @@ def test_the_demo_differs_from_run_to_run_and_replays_by_seed():
         sim = Simulation(Parameters.load(PARAMS),
                          replace(ScenarioConfig.load(PROJECT_ROOT / "config" / "scenario.yaml"), seed=seed),
                          results_dir=None)
-        pois = tuple((p.poi_id, round(float(p.position[0])), round(float(p.position[1]))) for p in sim.world.state.pois)
+        drawn = (*sim.world.state.pois, *sim.world.scheduled_pois)      # most appear only later
+        pois = tuple((p.poi_id, round(float(p.position[0])), round(float(p.position[1])), p.created_at_s)
+                     for p in drawn)
         return pois, tuple((t.action, t.at_s) for t in sim.world.timeline)
 
     assert layout(5) == layout(5)
     layouts = {layout(seed) for seed in range(10)}
-    assert len({pois for pois, _ in layouts}) == 10          # PoIs move
-    assert len({len(pois) for pois, _ in layouts}) > 1       # and their number changes
+    assert len({pois for pois, _ in layouts}) == 10          # PoIs move, and appear at other times
+    assert {len(pois) for pois, _ in layouts} == {10}        # always the 10 of the mission constraints
     assert len({times for _, times in layouts}) == 10        # events move
 
 

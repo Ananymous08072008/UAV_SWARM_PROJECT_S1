@@ -8,6 +8,7 @@ Per link, every ``update_interval_s``:
     received    Prx    = Ptx + Gtx + Grx - PL(d) - obstacle loss + fading,  fading ~ N(0, sigma)
     SNR                = Prx - noise floor
     PDR                = logistic(SNR; mid, slope) * radio_health(a) * radio_health(b)
+                         (0 beyond ``max_range_m``, when set: a hard radio range limit)
     estimate           = EWMA of PDR (what a real link-quality estimator would report)
     link up/down       with hysteresis (up >= link_up_pdr, down < link_down_pdr)
     latency            = hop_latency + retx_latency * (1/PDR - 1)   (expected retransmissions)
@@ -47,10 +48,13 @@ class CommParams:
     hop_latency_ms: float = 5.0
     retx_latency_ms: float = 8.0
     update_interval_s: float = 0.5
+    max_range_m: Optional[float] = None  # no link at all beyond this distance (None = path loss only)
 
     def __post_init__(self) -> None:
         if not 0 < self.pdr_smoothing <= 1:
             raise ValueError("pdr_smoothing must be in (0, 1]")
+        if self.max_range_m is not None and self.max_range_m <= 0:
+            raise ValueError("max_range_m must be > 0 or null")
         if not 0 < self.link_down_pdr <= self.link_up_pdr < 1:
             raise ValueError("require 0 < link_down_pdr <= link_up_pdr < 1")
         if self.snr_slope_db <= 0 or self.path_loss_exponent <= 0 or self.update_interval_s <= 0:
@@ -110,10 +114,13 @@ class CommunicationModel:
         z = (snr_db - self.params.snr_mid_db) / self.params.snr_slope_db
         return 1.0 / (1.0 + math.exp(-max(-50.0, min(50.0, z))))
 
+    def _out_of_range(self, distance_m: float) -> bool:
+        return self.params.max_range_m is not None and distance_m > self.params.max_range_m
+
     def predict_pdr(self, a: Sequence[float], b: Sequence[float], involves_gcs: bool = False) -> float:
         """Expected PDR of a healthy link (no fading) - used by planners."""
-        snr, _, _ = self._mean_snr_db(a, b, involves_gcs)
-        return self._pdr_from_snr(snr)
+        snr, d, _ = self._mean_snr_db(a, b, involves_gcs)
+        return 0.0 if self._out_of_range(d) else self._pdr_from_snr(snr)
 
     def range_for_pdr(self, target_pdr: float, involves_gcs: bool = False) -> float:
         """Free-space (no obstacle) distance at which a healthy link reaches ``target_pdr``."""
@@ -121,7 +128,8 @@ class CommunicationModel:
         snr_needed = p.snr_mid_db + p.snr_slope_db * math.log(target_pdr / (1.0 - target_pdr))
         gain = p.uav_antenna_gain_dbi + (p.gcs_antenna_gain_dbi if involves_gcs else p.uav_antenna_gain_dbi)
         max_path_loss = p.tx_power_dbm + gain - p.noise_floor_dbm - snr_needed
-        return 10 ** ((max_path_loss - p.path_loss_ref_db) / (10.0 * p.path_loss_exponent))
+        reach = 10 ** ((max_path_loss - p.path_loss_ref_db) / (10.0 * p.path_loss_exponent))
+        return reach if p.max_range_m is None else min(reach, p.max_range_m)
 
     def latency_ms(self, pdr: float) -> float:
         return self.params.hop_latency_ms + self.params.retx_latency_ms * (1.0 / max(pdr, 0.05) - 1.0)
@@ -152,7 +160,7 @@ class CommunicationModel:
                 snr, dist, obstructed = self._mean_snr_db(positions[a], positions[b], a == GCS_NODE_ID)
                 if p.fading_sigma_db > 0:
                     snr += float(self.rng.normal(0.0, p.fading_sigma_db))
-                measured = self._pdr_from_snr(snr) * health[a] * health[b]
+                measured = 0.0 if self._out_of_range(dist) else self._pdr_from_snr(snr) * health[a] * health[b]
                 prev = self.links.get((a, b))
                 if prev is None:
                     pdr, was_up = measured, measured >= p.link_up_pdr

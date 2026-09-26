@@ -3,13 +3,19 @@ swarm/energy_manager.py
 Return-to-home decisions for UAVs with limited flight time.
 
 For every airborne UAV the manager estimates the battery needed to fly home
-and land (+ reserve):
+and land (+ reserve). That level never drops below ``battery.critical_pct``,
+the return-to-home threshold: a UAV near the pad goes home exactly there, one
+so far out that the trip needs more leaves as soon as its battery only just
+covers it.
   * battery <= needed                    -> return home now
   * RELAY within ``handover_margin_pct``   -> handover: excluded from the relay
     plan so a replacement is sent; it keeps relaying until the replacement is
     on station (or ``max_handover_wait_s`` passes), then returns home
   * SURVEY that cannot finish its PoI      -> releases the PoI (progress kept)
-    and returns home; the allocator re-tasks the PoI
+    and returns home; the allocator re-tasks the PoI. With
+    ``leave_unfinishable_survey`` off it keeps surveying instead - every second
+    on station is progress the next UAV does not have to fly - and only leaves
+    once it reaches the return-to-home level like everyone else
   * IDLE / BACKUP with low battery and *nothing it could still fly* -> recharge
     proactively. One that could still take a pending PoI keeps flying instead
     of pulling itself out of an active mission early.
@@ -23,6 +29,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
+
+import numpy as np
 
 from core.events import EventType, Severity
 from core.uav import UAV, UAVRole
@@ -43,6 +51,7 @@ class EnergyParams:
     idle_recharge_below_pct: float = 60.0
     idle_recharge_after_s: float = 20.0
     park_when_idle: bool = True           # an IDLE UAV with nothing to do waits on the pad, not hovering
+    leave_unfinishable_survey: bool = True  # False = keep surveying until the return-to-home level
 
 
 class EnergyManager:
@@ -61,7 +70,11 @@ class EnergyManager:
     def needed_pct(self, uav: UAV) -> float:
         """Battery at which this UAV must start home: the trip home plus the reserve,
         and never below the critical floor (so the handover window is always usable)."""
-        return max(self.env.battery.return_cost_pct(uav) + self.params.reserve_pct,
+        return self.needed_at(uav)
+
+    def needed_at(self, uav: UAV, point: Optional[np.ndarray] = None) -> float:
+        """``needed_pct`` as if the UAV were at ``point`` (default: where it is now)."""
+        return max(self.env.battery.return_cost_pct(uav, point) + self.params.reserve_pct,
                    self.world.params.battery.critical_pct)
 
     def update(self, world: "World", has_pending_work: Optional[Callable[[UAV], bool]] = None) -> None:
@@ -87,7 +100,7 @@ class EnergyManager:
                 self._go_home(uav, "battery reserve reached")
             elif uav.role is UAVRole.RELAY and p.handover and uav.battery_pct <= needed + p.handover_margin_pct:
                 self._start_handover(uav)
-            elif uav.role is UAVRole.SURVEY and uav.assigned_poi is not None:
+            elif uav.role is UAVRole.SURVEY and uav.assigned_poi is not None and p.leave_unfinishable_survey:
                 poi = world.state.pois.get(uav.assigned_poi)
                 remaining = max(0.0, poi.survey_time_s - poi.progress_s)
                 if uav.battery_pct < bat.task_cost_pct(uav, uav.target if uav.target is not None else uav.position,

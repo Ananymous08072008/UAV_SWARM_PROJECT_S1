@@ -87,7 +87,11 @@ class RoleManager:
             return
         was_relay = uav.role is R.RELAY
         self._require(uav, R.RETURNING)
-        alt = self.safety.safe_altitude(uav, uav.home, self.world.params.uav.rth_altitude_m)
+        # Already over its pad (waiting there on standby): land from where it is. Climbing to the
+        # transit altitude first would only cross every level over the pads twice.
+        p = self.world.params.uav
+        over_pad = uav.horizontal_distance_to(uav.home) <= p.arrival_radius_m
+        alt = self.safety.safe_altitude(uav, uav.home, float(uav.position[2]) if over_pad else p.rth_altitude_m)
         self.world.return_home(uav.uav_id, reason, altitude_m=alt)
         if was_relay:
             self.world.publish(EventType.RELAY_RELEASED, f"{uav.name} left the RELAY role [{reason}]",

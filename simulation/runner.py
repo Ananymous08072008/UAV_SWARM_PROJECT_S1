@@ -96,10 +96,12 @@ class Simulation:
             return True
         # all_completed is checked directly as well: mission_complete_s is only
         # re-evaluated once per decision cycle, and a PoI that appeared since then
-        # must keep the run going even if every UAV has already landed.
+        # must keep the run going even if every UAV has already landed. The last UAV
+        # down also gets the seconds it needs to offload its imagery on the pad.
         return bool(self.stop_when_complete and self.manager.mission_complete_s is not None
-                    and self.world.state.pois.all_completed
-                    and self.manager.all_landed and self.world.pending_triggers == 0)
+                    and self.world.state.pois.all_completed and self.world.pending_spawns == 0
+                    and self.manager.all_landed and self.world.pending_triggers == 0
+                    and self.env.data.buffered_mb <= 1e-6)
 
     def start(self) -> None:
         self.world.start()

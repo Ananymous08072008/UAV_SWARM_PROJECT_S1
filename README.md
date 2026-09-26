@@ -35,9 +35,12 @@ python main.py --scenario scenarios/network_degradation.yaml --mode baseline
 python -m pytest -q                # 200 tests
 ```
 
-The default demo is different every run: it draws a new seed, 4-8 PoIs at random places, and a
-random time for each fault within its window. The seed is printed first; `--seed N` replays that
-run exactly. The scenarios in `scenarios/` keep fixed seeds for controlled comparisons.
+The default demo follows the mission constraints: a 45-minute mission over a 1000 x 1000 m area
+75 m from the operational center, 5 m/s UAVs with a 100 m radio range and 20-minute batteries
+(home at 20 %), and 10 PoIs that each appear at a random place and a random time in the first 30
+minutes. It is different every run: it draws a new seed, the PoIs, and a random time for each fault
+within its window. The seed is printed first; `--seed N` replays that run exactly. The scenarios in
+`scenarios/` keep fixed seeds for controlled comparisons.
 
 Useful flags: `--mode adaptive|baseline`, `--duration`, `--seed`, `--quiet`, `--all-events`,
 `--no-results`, `--keep-running`, `--port`, `--mavlink-target host:port`.

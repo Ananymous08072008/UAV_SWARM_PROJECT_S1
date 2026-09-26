@@ -21,7 +21,7 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Collection, Optional
 
 from core.events import EventType, Severity
 from core.uav import GCS_NODE_ID, UAVRole
@@ -161,11 +161,11 @@ class RouteManager:
             if route is None:
                 world.update_comm(uav.uav_id, neighbours=view.neighbours(uav.uav_id), connected=False,
                                   next_hop=None, route=(), hop_count=None, gcs_link_quality=0.0, pdr=0.0,
-                                  latency_ms=None)
+                                  etx=None, latency_ms=None)
             else:
                 world.update_comm(uav.uav_id, neighbours=view.neighbours(uav.uav_id), connected=True,
                                   next_hop=route.path[1], route=route.path, hop_count=route.hops,
-                                  gcs_link_quality=route.bottleneck_pdr, pdr=route.pdr,
+                                  gcs_link_quality=route.bottleneck_pdr, pdr=route.pdr, etx=route.etx,
                                   latency_ms=route.latency_ms)
 
     # ---------------------------------------------------------------- queries
@@ -173,18 +173,21 @@ class RouteManager:
         """UAVs whose current route to the GCS passes through ``uav_id``."""
         return {r.uav_id for r in self.routes.values() if uav_id in r.path[1:-1]}
 
-    def backbone_midpoint(self, positions: dict[int, Any]) -> Optional[Any]:
+    def backbone_midpoint(self, positions: dict[int, Any], carriers: Collection[int] = ()) -> Optional[Any]:
         """Midpoint of the longest UAV-to-UAV hop in use - where debris in the disaster area hurts most.
-        Hops touching the GCS are only used when no UAV-to-UAV hop exists."""
+        Hops on the routes of ``carriers`` (the surveyors: the backbone that carries the mission's
+        traffic) come first, so debris does not land on a spur of relays merely pre-positioned for
+        a later PoI. None while no UAV-to-UAV hop exists: a hop touching the GCS would put the
+        debris on the ground station itself, cutting it off from every direction at once."""
         best = None
         for route in sorted(self.routes.values(), key=lambda r: r.uav_id):
             dependents = len(self.dependents(route.uav_id))
             for a, b in zip(route.path, route.path[1:]):
-                if a not in positions or b not in positions:
+                if a not in positions or b not in positions or GCS_NODE_ID in (a, b):
                     continue
                 length = float(((positions[a][0] - positions[b][0]) ** 2
                                 + (positions[a][1] - positions[b][1]) ** 2) ** 0.5)
-                key = (GCS_NODE_ID not in (a, b), length, dependents)
+                key = (route.uav_id in carriers, length, dependents)
                 if best is None or key > best[0]:
                     best = (key, (positions[a] + positions[b]) / 2.0)
         return None if best is None else best[1]

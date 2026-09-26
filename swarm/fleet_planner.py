@@ -9,6 +9,9 @@ surveyors      the fewest that still finish every PoI before the mission
                (highest first), with trips home to recharge when the battery
                demands it. The schedule uses the swarm's own battery model, so
                it changes with every seed's PoI count, placement and survey times.
+               PoIs that only appear later (random_pois.spawn_s) cannot start
+               before they do; when those release times, not the fleet, set the
+               finish, no more surveyors are added than make a difference.
 relays         what keeps the first wave (the highest-priority PoIs) connected
                to the GCS, from the same plan the swarm flies later
                (swarm/relay_selector.py), obstacles included - and at least
@@ -30,7 +33,7 @@ The result is kept within ``uavs.min_count`` .. ``uavs.max_count``.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -94,6 +97,7 @@ class _Job:
     survey_s: float
     priority: int
     release_s: float = 0.0
+    deferred: bool = False     # the farthest PoI, held back until every other job is done
 
 
 def _survey_altitude(world: "World", altitude_m) -> float:
@@ -105,6 +109,10 @@ def plan_fleet(world: "World", env: "Environment", relay: RelayParams, fleet: Fl
     jobs = [_Job(p.poi_id, np.array([*p.position[:2], _survey_altitude(world, p.altitude_m)]),
                  max(0.0, p.survey_time_s - p.progress_s), p.priority)
             for p in world.state.pois if not p.is_completed]
+    # PoIs drawn for this run but due to appear later are part of the mission; each can only
+    # start once it is there.
+    jobs += [_Job(p.poi_id, np.array([*p.position[:2], _survey_altitude(world, p.altitude_m)]),
+                  p.survey_time_s, p.priority, p.created_at_s) for p in world.scheduled_pois]
 
     reserve = 0
     for trig in world.timeline:
@@ -124,7 +132,7 @@ def plan_fleet(world: "World", env: "Environment", relay: RelayParams, fleet: Fl
 
     budget = fleet.time_budget_fraction * world.duration_s
     surveyors, makespan = _fewest_surveyors(world, env.battery, _priority_order(world, jobs), budget, reserve_pct)
-    relays, unreachable = 0, ()
+    relays, unreachable, deepest = 0, (), 0
     if fleet.relay_chain:
         first_wave = _priority_order(world, [j for j in jobs if j.release_s <= 0.0])[:surveyors]
         # The planner only reads the world's geometry and the radio model; it never
@@ -144,7 +152,7 @@ def plan_fleet(world: "World", env: "Environment", relay: RelayParams, fleet: Fl
     # its chain have typically already done other duty and are not all fresh off the pad - a
     # chain sized with zero spare slack can lose several relays to recharge at once and collapse
     # entirely (chains are filled all-or-nothing), right when the demo should show it best.
-    handover_margin = math.ceil(deepest / 3) if fleet.relay_chain else 0
+    handover_margin = math.ceil(deepest / 3)
     spares = max(fleet.spares, world.scenario.uavs.min_count - (surveyors + relays + reserve), handover_margin)
     return FleetPlan(surveyors=surveyors, relays=relays, spares=spares, fault_reserve=reserve,
                      max_count=world.scenario.uavs.max_count, makespan_s=makespan, time_budget_s=budget,
@@ -156,10 +164,12 @@ def _priority_order(world: "World", jobs: list[_Job]) -> list[_Job]:
     route (spatial clustering) instead of ranking each job by GCS distance on its own, so a
     surveyor sweeps a cluster of nearby PoIs together instead of zig-zagging between them.
 
-    The one job farthest from the GCS among those known at launch is moved to the very end,
-    mirroring the task allocator's own deferral of the farthest PoI (swarm/task_allocator.py,
-    ``_defer_farthest``) - so the makespan and first-wave relay estimates this feeds match
-    what the swarm actually flies, instead of assuming it goes out with the first wave."""
+    The one job farthest from the GCS among those known at launch is moved to the very end
+    and marked ``deferred``, mirroring the task allocator's own deferral of the farthest PoI
+    (swarm/task_allocator.py, ``_defer_farthest``) - so the makespan and first-wave relay
+    estimates this feeds match what the swarm actually flies, instead of assuming it goes
+    out with the first wave. PoIs that appear later are not modelled that way: which one is
+    farthest at any moment depends on what has appeared by then."""
     gcs = np.asarray(world.state.gcs_position[:2], dtype=float)
     bands: dict[tuple[float, int], list[_Job]] = {}
     for j in jobs:
@@ -170,7 +180,7 @@ def _priority_order(world: "World", jobs: list[_Job]) -> list[_Job]:
     at_launch = [j for j in ordered if j.release_s <= 0.0]
     if len(at_launch) > 1:
         farthest = max(at_launch, key=lambda j: float(np.hypot(*(j.waypoint[:2] - gcs))))
-        ordered = [j for j in ordered if j.key != farthest.key] + [farthest]
+        ordered = [j for j in ordered if j.key != farthest.key] + [replace(farthest, deferred=True)]
     return ordered
 
 
@@ -189,15 +199,17 @@ def _nearest_neighbour_route(group: list[_Job], start_xy: np.ndarray) -> list[_J
 
 def _fewest_surveyors(world: "World", battery: "BatteryModel", jobs: list[_Job], budget_s: float,
                       reserve_pct: float) -> tuple[int, float]:
-    """Smallest surveyor count whose schedule fits the budget; else the fastest one possible."""
+    """Smallest surveyor count whose schedule fits the budget; else the fewest that are (all but)
+    as fast as the fastest schedule possible. When PoIs appear late, their release times set the
+    finish long before one surveyor per PoI would, and the extra surveyors would only idle."""
     if not jobs:
         return 0, 0.0
-    best = (len(jobs), _makespan(world, battery, jobs, len(jobs), reserve_pct))
-    for k in range(1, len(jobs)):
-        makespan = _makespan(world, battery, jobs, k, reserve_pct)
-        if makespan <= budget_s:
-            return k, makespan
-    return best
+    spans = [(k, _makespan(world, battery, jobs, k, reserve_pct)) for k in range(1, len(jobs) + 1)]
+    fits = next(((k, m) for k, m in spans if m <= budget_s), None)
+    if fits is not None:
+        return fits
+    fastest = min(m for _, m in spans)
+    return next((k, m) for k, m in spans if m <= fastest * 1.01)
 
 
 def _makespan(world: "World", battery: "BatteryModel", jobs: list[_Job], k: int, reserve_pct: float) -> float:
@@ -205,12 +217,12 @@ def _makespan(world: "World", battery: "BatteryModel", jobs: list[_Job], k: int,
 
     Each job goes to the surveyor that would finish it first. A surveyor that
     could not fly the job and still get home above ``reserve_pct`` lands,
-    recharges to ``resume_pct`` and flies it from the pad. The last job -
-    ``_priority_order`` puts the farthest PoI there - does not start until every
-    surveyor has finished all its other jobs, mirroring the task allocator's own
-    deferral of it (swarm/task_allocator.py, ``_defer_farthest``), so this estimate
-    matches what the swarm actually flies. Returns when the last surveyor is back
-    on the ground.
+    recharges to ``resume_pct`` and flies it from the pad. A ``deferred`` last job -
+    the farthest PoI, which ``_priority_order`` moves there - does not start until
+    every surveyor has finished all its other jobs, mirroring the task allocator's
+    own deferral of it (swarm/task_allocator.py, ``_defer_farthest``), so this
+    estimate matches what the swarm actually flies. Returns when the last surveyor
+    is back on the ground.
     """
     uav_p, bat_p = world.params.uav, world.params.battery
     spawn = world.scenario.uavs
@@ -244,7 +256,7 @@ def _makespan(world: "World", battery: "BatteryModel", jobs: list[_Job], k: int,
         fleet[i] = (done, pos, pct)
 
     fleet = [(0.0, pad, full) for _ in range(k)]            # (time, position, battery %) per surveyor
-    regular, deferred = (jobs[:-1], jobs[-1]) if len(jobs) > 1 else (jobs, None)
+    regular, deferred = (jobs[:-1], jobs[-1]) if jobs and jobs[-1].deferred else (jobs, None)
     for job in regular:
         if job_cost(pad, job) + reserve_pct > bat_p.resume_pct:
             continue                                        # out of range even on a fresh battery

@@ -45,6 +45,26 @@ def test_uav_to_uav_range_is_100_m_and_links_degrade_beyond_it():
     assert pdr(140) < CommParams().link_down_pdr        # and the link drops out
 
 
+def test_a_hard_range_limit_cuts_every_link_beyond_it():
+    comm = model(max_range_m=100.0, gcs_antenna_gain_dbi=0.0)
+    a = np.array([0, 0, 60.0])
+    assert comm.predict_pdr(a, np.array([99.0, 0, 60.0])) > 0.85
+    assert comm.predict_pdr(a, np.array([101.0, 0, 60.0])) == 0.0        # ~0.84 without the limit
+    assert comm.range_for_pdr(0.5) == pytest.approx(100.0)                # capped, not ~121 m
+    assert comm.range_for_pdr(0.85, involves_gcs=True) == pytest.approx(100.0, abs=0.5)
+
+
+def test_measured_links_drop_at_the_range_limit():
+    world = make_world()
+    comm = CommunicationModel(CommParams(max_range_m=100.0), np.random.default_rng(1), ObstacleField())
+    world.goto(1, (100, 0, 50), "test")
+    world.goto(2, (210, 0, 50), "test")      # 110 m apart: degraded but still up without the limit
+    for _ in range(400):
+        world.step()
+    comm.update(world, force=True)
+    assert comm.link(1, 2).pdr == 0.0 and not comm.link(1, 2).up
+
+
 def test_obstacle_blocks_a_link_but_not_a_detour():
     field = ObstacleField([square("B1", (40, 0), 24, height_m=60.0, attenuation_db=40.0)])
     comm = model(field)
