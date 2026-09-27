@@ -44,7 +44,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--duration", type=float, help="override the scenario duration (s)")
     parser.add_argument("--seed", type=int, help="override the scenario seed")
     parser.add_argument("--realtime", action="store_true", help="pace the simulation against the wall clock")
-    parser.add_argument("--speed", type=float, default=1.0, help="real-time multiplier (with --realtime)")
+    parser.add_argument("--speed", type=float, default=8.0, help="real-time multiplier (with --realtime)")
     parser.add_argument("--dashboard", action="store_true", help="serve the live dashboard")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)

@@ -22,10 +22,10 @@
 # =====================================================================
 
 simulation:
-  dt_s: 0.1                 # physics step
+  dt_s: 0.2                 # physics step (doubled for faster simulation)
   seed: 42                  # master RNG seed -> reproducible experiments
-  status_interval_s: 30.0   # console status table period (main.py)
-  event_history: 5000       # events kept in memory for the dashboard
+  status_interval_s: 60.0   # console status table period (main.py)
+  event_history: 2000       # events kept in memory for the dashboard
 
 # Geographic anchor for Mission Planner. Default = ArduPilot SITL home (CMAC).
 geo_origin:
@@ -89,7 +89,7 @@ data:
 
 # --- swarm intelligence (swarm/*) -------------------------------------
 swarm:
-  decision_interval_s: 1.0
+  decision_interval_s: 2.0
   backup_enabled: true
   backup_min_battery_pct: 60.0
   data_ferry: true            # disconnected UAVs carry data back themselves
